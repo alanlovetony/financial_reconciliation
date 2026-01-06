@@ -31,72 +31,81 @@ st.markdown("""
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
+    /* Streamlit 默认顶部留白极大，强制去除 */
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 2rem !important;
+    }
+    
     .main > div { 
-        padding: 1.5rem 2rem; 
+        padding: 0 2rem; 
         max-width: 1400px;
         margin: 0 auto;
     }
     
     /* 顶部标题区 */
+    /* 顶部标题区 */
     .header-container {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 20px;
-        padding: 2rem 2.5rem;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 40px rgba(102, 126, 234, 0.3);
+        border-radius: 12px;
+        padding: 0.8rem 1.5rem;
+        margin-bottom: 0.5rem;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
     }
     
     .header-title {
         color: white;
-        font-size: 2.5rem;
+        font-size: 2rem;
         font-weight: 800;
         margin: 0;
         display: flex;
         align-items: center;
-        gap: 12px;
+        justify-content: center;
+        gap: 10px;
     }
     
     .header-subtitle {
-        color: rgba(255,255,255,0.85);
-        font-size: 1.1rem;
-        margin-top: 0.5rem;
+        color: rgba(255,255,255,0.9);
+        font-size: 1rem;
+        margin-top: 0.3rem;
         font-weight: 500;
+        text-align: center;
     }
     
     /* 上传区域 */
     .upload-container {
         background: white;
-        border-radius: 16px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        border-radius: 10px;
+        padding: 0.8rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         border: 1px solid #eef2f7;
-        margin-bottom: 1.5rem;
+        margin-bottom: 0.5rem;
     }
     
     .upload-title {
-        font-size: 1.1rem;
+        font-size: 1rem;
         font-weight: 600;
         color: #1a202c;
-        margin-bottom: 0.75rem;
+        margin-bottom: 0.5rem;
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
     }
     
     /* 统计卡片 */
     .stats-grid {
         display: grid;
         grid-template-columns: repeat(6, 1fr);
-        gap: 1rem;
-        margin: 1.5rem 0;
+        gap: 0.6rem;
+        margin: 0.8rem 0;
     }
     
     .stat-card {
         background: white;
-        border-radius: 16px;
-        padding: 1.25rem;
+        border-radius: 10px;
+        padding: 0.8rem;
         text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.06);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         border: 1px solid #eef2f7;
         transition: transform 0.2s, box-shadow 0.2s;
     }
@@ -567,8 +576,6 @@ with st.expander("📖 查看对账规则", expanded=False):
 
 # 开始对账
 if file_yiyun and file_bank:
-    st.markdown("<br>", unsafe_allow_html=True)
-    
     col_btn = st.columns([1, 2, 1])
     with col_btn[1]:
         run_btn = st.button("🔍 开始对账", use_container_width=True, type="primary")
@@ -629,8 +636,6 @@ if file_yiyun and file_bank:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            st.markdown("<br>", unsafe_allow_html=True)
             
             # Tab展示
             tab1, tab2, tab3, tab4 = st.tabs([
