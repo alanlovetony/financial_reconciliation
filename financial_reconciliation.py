@@ -382,153 +382,147 @@ def process_bank_data(df_bank):
 
 def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
     """
-    核心对账逻辑 - 从银行流水出发匹配业务数据
+    核心对账逻辑 - 每日一行结果，分别显示T+1和T+N的匹配状态
     
     逻辑：
-    1. 每笔银行流水，先尝试匹配 T+1（到账日期-1天的业务）
-    2. T+1 匹配不上的，在 T+N 中倒查（可能是前几天的业务）
-    3. 按金额匹配（允许0.01误差）
+    1. 按业务日期汇总，每天只显示一行
+    2. 分别检查 T+1 和 T+N 的匹配情况
+    3. 金额必须完全相等才算匹配
     """
-    results = []
     
     # 创建 T+1 和 T+N 的字典，方便查找
-    t1_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数'], '已匹配': False} 
+    t1_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数']} 
                for _, row in df_t1_daily.iterrows()}
-    tn_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数'], '已匹配': False} 
+    tn_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数']} 
                for _, row in df_tn_daily.iterrows()}
     
-    # 标记银行流水是否已匹配
-    df_bank = df_bank.copy()
-    df_bank['已匹配'] = False
-    df_bank['匹配业务日期'] = None
-    df_bank['匹配来源'] = None
+    # 按到账日期汇总银行流水
+    bank_by_date = df_bank.groupby('到账日期').agg({
+        '收入': list  # 保留所有金额用于匹配
+    }).to_dict()['收入']
     
-    # 第一轮：T+1 匹配（到账日期 - 1天）
-    for idx, bank_row in df_bank.iterrows():
-        bank_amount = bank_row['收入']
-        bank_date = bank_row['到账日期']
-        
-        # T+1: 业务日期 = 到账日期 - 1天
-        biz_date = (pd.to_datetime(bank_date) - timedelta(days=1)).date()
-        
-        if biz_date in t1_dict and not t1_dict[biz_date]['已匹配']:
-            t1_amount = t1_dict[biz_date]['金额']
-            if np.isclose(bank_amount, t1_amount, atol=0.01):
-                # 匹配成功
-                df_bank.loc[idx, '已匹配'] = True
-                df_bank.loc[idx, '匹配业务日期'] = biz_date
-                df_bank.loc[idx, '匹配来源'] = 'T+1'
-                t1_dict[biz_date]['已匹配'] = True
+    # 收集所有业务日期
+    all_biz_dates = set(t1_dict.keys()) | set(tn_dict.keys())
     
-    # 第二轮：T+N 匹配（从银行备注提取业务日期，或倒查前N天）
-    for idx, bank_row in df_bank.iterrows():
-        if bank_row['已匹配']:
-            continue
-            
-        bank_amount = bank_row['收入']
-        bank_date = bank_row['到账日期']
-        
-        # 尝试从银行备注中提取业务日期
-        biz_date_from_remark = extract_business_date(bank_row)
-        
-        if biz_date_from_remark and biz_date_from_remark in tn_dict and not tn_dict[biz_date_from_remark]['已匹配']:
-            tn_amount = tn_dict[biz_date_from_remark]['金额']
-            if np.isclose(bank_amount, tn_amount, atol=0.01):
-                # 匹配成功
-                days_diff = (pd.to_datetime(bank_date) - pd.to_datetime(biz_date_from_remark)).days
-                df_bank.loc[idx, '已匹配'] = True
-                df_bank.loc[idx, '匹配业务日期'] = biz_date_from_remark
-                df_bank.loc[idx, '匹配来源'] = f'T+{days_diff}'
-                tn_dict[biz_date_from_remark]['已匹配'] = True
-                continue
-        
-        # 如果备注中没有日期信息，倒查前30天内的业务
-        for days_back in range(1, 31):
-            biz_date = (pd.to_datetime(bank_date) - timedelta(days=days_back)).date()
-            
-            if biz_date in tn_dict and not tn_dict[biz_date]['已匹配']:
-                tn_amount = tn_dict[biz_date]['金额']
-                if np.isclose(bank_amount, tn_amount, atol=0.01):
-                    # 匹配成功
-                    df_bank.loc[idx, '已匹配'] = True
-                    df_bank.loc[idx, '匹配业务日期'] = biz_date
-                    df_bank.loc[idx, '匹配来源'] = f'T+{days_back}'
-                    tn_dict[biz_date]['已匹配'] = True
-                    break
+    # 记录匹配结果
+    results = []
+    matched_bank_amounts = {}  # 记录已匹配的银行金额 {到账日期: [已匹配金额列表]}
     
-    # 生成对账报告
-    # 1. 已匹配的银行流水
-    for idx, bank_row in df_bank.iterrows():
-        if bank_row['已匹配']:
-            biz_date = bank_row['匹配业务日期']
-            source = bank_row['匹配来源']
+    for biz_date in sorted(all_biz_dates):
+        row_data = {
+            '业务日期': biz_date,
+            'T+1_系统应收': 0,
+            'T+1_笔数': 0,
+            'T+1_银行实收': 0,
+            'T+1_到账日期': None,
+            'T+1_状态': '-',
+            'T+N_系统应收': 0,
+            'T+N_笔数': 0,
+            'T+N_银行实收': 0,
+            'T+N_到账日期': None,
+            'T+N_到账天数': None,
+            'T+N_状态': '-',
+        }
+        
+        # 检查 T+1 匹配
+        if biz_date in t1_dict:
+            t1_info = t1_dict[biz_date]
+            row_data['T+1_系统应收'] = t1_info['金额']
+            row_data['T+1_笔数'] = int(t1_info['笔数'])
             
-            if source == 'T+1' and biz_date in t1_dict:
-                sys_amount = t1_dict[biz_date]['金额']
-                sys_count = t1_dict[biz_date]['笔数']
-            elif biz_date in tn_dict:
-                sys_amount = tn_dict[biz_date]['金额']
-                sys_count = tn_dict[biz_date]['笔数']
+            # T+1: 到账日期 = 业务日期 + 1天
+            expected_bank_date = (pd.to_datetime(biz_date) + timedelta(days=1)).date()
+            
+            if expected_bank_date in bank_by_date:
+                bank_amounts = bank_by_date[expected_bank_date]
+                # 查找已匹配的金额
+                matched_for_date = matched_bank_amounts.get(expected_bank_date, [])
+                
+                # 查找完全匹配的金额
+                t1_amount = round(t1_info['金额'], 2)
+                matched = False
+                for amt in bank_amounts:
+                    amt_rounded = round(amt, 2)
+                    if amt_rounded == t1_amount and amt not in matched_for_date:
+                        # 完全匹配
+                        row_data['T+1_银行实收'] = amt
+                        row_data['T+1_到账日期'] = expected_bank_date
+                        row_data['T+1_状态'] = '✅ 匹配'
+                        # 记录已匹配
+                        if expected_bank_date not in matched_bank_amounts:
+                            matched_bank_amounts[expected_bank_date] = []
+                        matched_bank_amounts[expected_bank_date].append(amt)
+                        matched = True
+                        break
+                
+                if not matched:
+                    row_data['T+1_状态'] = '❌ 未匹配'
             else:
-                sys_amount = 0
-                sys_count = 0
+                row_data['T+1_状态'] = '❌ 未到账'
+        
+        # 检查 T+N 匹配
+        if biz_date in tn_dict:
+            tn_info = tn_dict[biz_date]
+            row_data['T+N_系统应收'] = tn_info['金额']
+            row_data['T+N_笔数'] = int(tn_info['笔数'])
             
-            results.append({
-                '业务日期': biz_date,
-                '系统应收总额': sys_amount,
-                '系统笔数': int(sys_count),
-                '银行实收总额': bank_row['收入'],
-                '到账日期': bank_row['到账日期'],
-                '差异金额': bank_row['收入'] - sys_amount,
-                '匹配来源': source,
-                '匹配状态': '✅ 匹配',
-                '银行摘要': bank_row['银行摘要']
-            })
+            tn_amount = round(tn_info['金额'], 2)
+            matched = False
+            
+            # T+N: 在后续N天内查找匹配（最多查30天）
+            for days_after in range(1, 31):
+                expected_bank_date = (pd.to_datetime(biz_date) + timedelta(days=days_after)).date()
+                
+                if expected_bank_date in bank_by_date:
+                    bank_amounts = bank_by_date[expected_bank_date]
+                    matched_for_date = matched_bank_amounts.get(expected_bank_date, [])
+                    
+                    for amt in bank_amounts:
+                        amt_rounded = round(amt, 2)
+                        if amt_rounded == tn_amount and amt not in matched_for_date:
+                            # 完全匹配
+                            row_data['T+N_银行实收'] = amt
+                            row_data['T+N_到账日期'] = expected_bank_date
+                            row_data['T+N_到账天数'] = days_after
+                            row_data['T+N_状态'] = f'✅ T+{days_after}'
+                            # 记录已匹配
+                            if expected_bank_date not in matched_bank_amounts:
+                                matched_bank_amounts[expected_bank_date] = []
+                            matched_bank_amounts[expected_bank_date].append(amt)
+                            matched = True
+                            break
+                
+                if matched:
+                    break
+            
+            if not matched:
+                row_data['T+N_状态'] = '❌ 未到账'
+        
+        results.append(row_data)
     
-    # 2. 未匹配的银行流水
-    for idx, bank_row in df_bank.iterrows():
-        if not bank_row['已匹配']:
-            results.append({
-                '业务日期': None,
-                '系统应收总额': 0,
-                '系统笔数': 0,
-                '银行实收总额': bank_row['收入'],
-                '到账日期': bank_row['到账日期'],
-                '差异金额': bank_row['收入'],
-                '匹配来源': '未匹配',
-                '匹配状态': '⚠️ 银行有流水无业务',
-                '银行摘要': bank_row['银行摘要']
-            })
+    # 查找未匹配的银行流水
+    unmatched_bank = []
+    for bank_date, amounts in bank_by_date.items():
+        matched_for_date = matched_bank_amounts.get(bank_date, [])
+        for amt in amounts:
+            if amt not in matched_for_date:
+                unmatched_bank.append({
+                    '业务日期': None,
+                    'T+1_系统应收': 0,
+                    'T+1_笔数': 0,
+                    'T+1_银行实收': amt,
+                    'T+1_到账日期': bank_date,
+                    'T+1_状态': '⚠️ 无业务',
+                    'T+N_系统应收': 0,
+                    'T+N_笔数': 0,
+                    'T+N_银行实收': 0,
+                    'T+N_到账日期': None,
+                    'T+N_到账天数': None,
+                    'T+N_状态': '-',
+                })
     
-    # 3. 未匹配的 T+1 业务
-    for biz_date, info in t1_dict.items():
-        if not info['已匹配']:
-            results.append({
-                '业务日期': biz_date,
-                '系统应收总额': info['金额'],
-                '系统笔数': int(info['笔数']),
-                '银行实收总额': 0,
-                '到账日期': None,
-                '差异金额': -info['金额'],
-                '匹配来源': 'T+1未到账',
-                '匹配状态': '❌ 业务未到账',
-                '银行摘要': ''
-            })
-    
-    # 4. 未匹配的 T+N 业务
-    for biz_date, info in tn_dict.items():
-        if not info['已匹配']:
-            results.append({
-                '业务日期': biz_date,
-                '系统应收总额': info['金额'],
-                '系统笔数': int(info['笔数']),
-                '银行实收总额': 0,
-                '到账日期': None,
-                '差异金额': -info['金额'],
-                '匹配来源': 'T+N未到账',
-                '匹配状态': '❌ 业务未到账',
-                '银行摘要': ''
-            })
+    # 合并结果
+    results.extend(unmatched_bank)
     
     df_report = pd.DataFrame(results)
     
@@ -537,8 +531,10 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
     df_report = df_report.sort_values('业务日期').reset_index(drop=True)
     df_report['业务日期_显示'] = df_report['业务日期'].dt.strftime('%Y-%m-%d')
     df_report['业务日期_显示'] = df_report['业务日期_显示'].fillna('-')
-    df_report['到账日期_显示'] = pd.to_datetime(df_report['到账日期']).dt.strftime('%Y-%m-%d')
-    df_report['到账日期_显示'] = df_report['到账日期_显示'].fillna('-')
+    df_report['T+1_到账日期_显示'] = pd.to_datetime(df_report['T+1_到账日期']).dt.strftime('%Y-%m-%d')
+    df_report['T+1_到账日期_显示'] = df_report['T+1_到账日期_显示'].fillna('-')
+    df_report['T+N_到账日期_显示'] = pd.to_datetime(df_report['T+N_到账日期']).dt.strftime('%Y-%m-%d')
+    df_report['T+N_到账日期_显示'] = df_report['T+N_到账日期_显示'].fillna('-')
     
     return df_report, df_bank
 
@@ -563,18 +559,36 @@ def create_pivot_table(df_by_project, df_report):
     # 按合计金额降序排列
     pivot = pivot.sort_values('合计', ascending=False)
     
-    # 获取每个日期的对账状态（用于颜色标识）
+    # 获取每个日期的对账状态（用于颜色标识）- 适配新格式
     date_status = {}
     for _, row in df_report.iterrows():
         if pd.notna(row['业务日期']):
             date_key = pd.to_datetime(row['业务日期']).strftime('%m/%d')
-            # 如果同一日期有多条记录，优先显示匹配的状态
-            if date_key not in date_status or '✅' in row['匹配状态']:
-                date_status[date_key] = {
-                    'status': row['匹配状态'],
-                    'diff': row['差异金额'],
-                    'source': row.get('匹配来源', '')
-                }
+            t1_status = str(row.get('T+1_状态', '-'))
+            tn_status = str(row.get('T+N_状态', '-'))
+            
+            # 确定综合状态
+            if '✅' in t1_status and '✅' in tn_status:
+                status = '✅ 全部匹配'
+            elif '✅' in t1_status or '✅' in tn_status:
+                if '❌' in t1_status or '❌' in tn_status:
+                    status = '⚠️ 部分匹配'
+                else:
+                    status = '✅ 匹配'
+            elif '❌' in t1_status or '❌' in tn_status:
+                status = '❌ 未匹配'
+            else:
+                status = '-'
+            
+            # 计算差异
+            t1_diff = row.get('T+1_银行实收', 0) - row.get('T+1_系统应收', 0)
+            tn_diff = row.get('T+N_银行实收', 0) - row.get('T+N_系统应收', 0)
+            
+            date_status[date_key] = {
+                'status': status,
+                'diff': t1_diff + tn_diff,
+                'source': f"T+1:{t1_status} T+N:{tn_status}"
+            }
     
     return pivot, date_status
 
@@ -615,41 +629,54 @@ def style_pivot_table(pivot_df, date_status):
 
 
 def style_report(df):
-    """美化对账报告"""
-    display_df = df[['业务日期_显示', '系统应收总额', '系统笔数', '银行实收总额', 
-                     '到账日期_显示', '差异金额', '匹配来源', '匹配状态']].copy()
-    display_df.columns = ['业务日期', '系统应收', '笔数', '银行实收', '到账日期', '差异', '匹配来源', '状态']
+    """美化对账报告 - 每日一行，分别显示T+1和T+N状态"""
+    display_df = df[['业务日期_显示', 
+                     'T+1_系统应收', 'T+1_笔数', 'T+1_银行实收', 'T+1_状态',
+                     'T+N_系统应收', 'T+N_笔数', 'T+N_银行实收', 'T+N_状态']].copy()
+    display_df.columns = ['业务日期', 
+                          'T+1应收', 'T+1笔数', 'T+1实收', 'T+1状态',
+                          'T+N应收', 'T+N笔数', 'T+N实收', 'T+N状态']
     
     def highlight_row(row):
-        if '✅' in str(row['状态']):
-            return ['background-color: #d4edda'] * len(row)
-        elif '⚠️' in str(row['状态']):
-            return ['background-color: #fff3cd'] * len(row)  # 黄色
+        t1_status = str(row['T+1状态'])
+        tn_status = str(row['T+N状态'])
+        
+        # 判断整行状态
+        if '⚠️' in t1_status:
+            return ['background-color: #fff3cd'] * len(row)  # 黄色 - 银行有流水无业务
+        elif '❌' in t1_status or '❌' in tn_status:
+            return ['background-color: #f8d7da'] * len(row)  # 红色 - 有未匹配
+        elif '✅' in t1_status or '✅' in tn_status:
+            return ['background-color: #d4edda'] * len(row)  # 绿色 - 匹配成功
         else:
-            return ['background-color: #f8d7da'] * len(row)  # 红色
+            return [''] * len(row)
     
     return display_df.style.apply(highlight_row, axis=1).format({
-        '系统应收': '¥{:,.2f}',
-        '银行实收': '¥{:,.2f}',
-        '差异': '¥{:,.2f}'
+        'T+1应收': '¥{:,.2f}',
+        'T+1实收': '¥{:,.2f}',
+        'T+N应收': '¥{:,.2f}',
+        'T+N实收': '¥{:,.2f}'
     })
 
 
 def to_excel(df_report, pivot_df, df_bank_detail, df_t1, df_tn):
-    """导出Excel"""
+    """导出Excel - 每日一行，分别显示T+1和T+N状态"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 对账汇总
-        export_df = df_report[['业务日期_显示', '系统应收总额', '系统笔数', 
-                               '银行实收总额', '到账日期_显示', '差异金额', '匹配来源', '匹配状态']].copy()
-        export_df.columns = ['业务日期', '系统应收', '笔数', '银行实收', '到账日期', '差异', '匹配来源', '状态']
+        # 对账汇总 - 新格式
+        export_df = df_report[['业务日期_显示', 
+                               'T+1_系统应收', 'T+1_笔数', 'T+1_银行实收', 'T+1_到账日期_显示', 'T+1_状态',
+                               'T+N_系统应收', 'T+N_笔数', 'T+N_银行实收', 'T+N_到账日期_显示', 'T+N_状态']].copy()
+        export_df.columns = ['业务日期', 
+                             'T+1应收', 'T+1笔数', 'T+1实收', 'T+1到账日期', 'T+1状态',
+                             'T+N应收', 'T+N笔数', 'T+N实收', 'T+N到账日期', 'T+N状态']
         export_df.to_excel(writer, index=False, sheet_name='对账汇总')
         
         # 项目明细透视表
         pivot_df.to_excel(writer, sheet_name='项目明细(透视)')
         
         # 银行流水
-        bank_cols = ['发生时间', '收入', '到账日期', '已匹配', '匹配业务日期', '匹配来源', '银行摘要']
+        bank_cols = ['发生时间', '收入', '到账日期', '银行摘要']
         available_cols = [c for c in bank_cols if c in df_bank_detail.columns]
         df_bank_detail[available_cols].to_excel(writer, index=False, sheet_name='银行流水')
         
@@ -753,12 +780,20 @@ if file_yiyun and file_bank:
                 # 创建透视表
                 pivot_df, date_status = create_pivot_table(df_by_project, df_report)
                 
-                # 统计数据
-                matched = len(df_report[df_report['匹配状态'].str.contains('✅')])
-                over = len(df_report[df_report['匹配状态'].str.contains('⚠️')])
-                under = len(df_report[df_report['匹配状态'].str.contains('❌')])
-                total_system = df_report['系统应收总额'].sum()
-                total_bank = df_report['银行实收总额'].sum()
+                # 统计数据 - 新格式
+                t1_matched = len(df_report[df_report['T+1_状态'].str.contains('✅', na=False)])
+                t1_unmatched = len(df_report[df_report['T+1_状态'].str.contains('❌', na=False)])
+                tn_matched = len(df_report[df_report['T+N_状态'].str.contains('✅', na=False)])
+                tn_unmatched = len(df_report[df_report['T+N_状态'].str.contains('❌', na=False)])
+                bank_no_biz = len(df_report[df_report['T+1_状态'].str.contains('⚠️', na=False)])
+                
+                total_t1_system = df_report['T+1_系统应收'].sum()
+                total_t1_bank = df_report['T+1_银行实收'].sum()
+                total_tn_system = df_report['T+N_系统应收'].sum()
+                total_tn_bank = df_report['T+N_银行实收'].sum()
+                
+                total_system = total_t1_system + total_tn_system
+                total_bank = total_t1_bank + total_tn_bank
                 total_diff = total_bank - total_system
                 
                 # 步骤3: 结果展示
@@ -771,27 +806,36 @@ if file_yiyun and file_bank:
                 
                 # 统计卡片
                 st.markdown("<br>", unsafe_allow_html=True)
-                cols = st.columns(5)
+                cols = st.columns(6)
                 
                 with cols[0]:
                     st.markdown(f"""
                     <div class="metric-card metric-card-success">
-                        <div class="metric-label">✅ 匹配成功</div>
-                        <div class="metric-value">{matched}</div>
+                        <div class="metric-label">✅ T+1匹配</div>
+                        <div class="metric-value">{t1_matched}</div>
                         <div class="metric-label">天</div>
                     </div>
                     """, unsafe_allow_html=True)
                 
                 with cols[1]:
                     st.markdown(f"""
-                    <div class="metric-card metric-card-danger">
-                        <div class="metric-label">❌ 银行少收</div>
-                        <div class="metric-value">{under}</div>
+                    <div class="metric-card metric-card-success">
+                        <div class="metric-label">✅ T+N匹配</div>
+                        <div class="metric-value">{tn_matched}</div>
                         <div class="metric-label">天</div>
                     </div>
                     """, unsafe_allow_html=True)
                 
                 with cols[2]:
+                    st.markdown(f"""
+                    <div class="metric-card metric-card-danger">
+                        <div class="metric-label">❌ 未匹配</div>
+                        <div class="metric-value">{t1_unmatched + tn_unmatched}</div>
+                        <div class="metric-label">T+1:{t1_unmatched} T+N:{tn_unmatched}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with cols[3]:
                     st.markdown(f"""
                     <div class="metric-card">
                         <div class="metric-label">📊 系统应收</div>
@@ -800,7 +844,7 @@ if file_yiyun and file_bank:
                     </div>
                     """, unsafe_allow_html=True)
                 
-                with cols[3]:
+                with cols[4]:
                     st.markdown(f"""
                     <div class="metric-card metric-card-info">
                         <div class="metric-label">🏦 银行实收</div>
@@ -809,7 +853,7 @@ if file_yiyun and file_bank:
                     </div>
                     """, unsafe_allow_html=True)
                 
-                with cols[4]:
+                with cols[5]:
                     diff_class = "metric-card-success" if abs(total_diff) < 1 else "metric-card-danger"
                     st.markdown(f"""
                     <div class="metric-card {diff_class}">
@@ -881,8 +925,8 @@ if file_yiyun and file_bank:
                 
                 with tab3:
                     st.markdown("##### 银行入账明细")
-                    bank_display = df_bank_detail[['发生时间', '收入', '到账日期', '已匹配', '匹配业务日期', '匹配来源', '银行摘要']].copy()
-                    bank_display.columns = ['入账时间', '金额', '到账日期', '已匹配', '对应业务日期', '匹配来源', '摘要']
+                    bank_display = df_bank_detail[['发生时间', '收入', '到账日期', '银行摘要']].copy()
+                    bank_display.columns = ['入账时间', '金额', '到账日期', '摘要']
                     st.dataframe(bank_display, use_container_width=True, height=400)
                 
                 with tab4:
