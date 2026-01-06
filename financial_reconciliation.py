@@ -1,13 +1,19 @@
 """
 财务对账工具 - Financial Reconciliation Tool
 用于对比业务系统数据与银行实际到账流水
+
+更新说明：
+- 只需上传两个文件：有益云数据 和 银行流水
+- 自动根据捐赠说明中是否包含【GFYH】来区分T+1和T+N数据
+  - 带【GFYH】的为 T+N
+  - 不带【GFYH】的为 T+1
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 
 # 页面配置
@@ -216,12 +222,16 @@ with st.sidebar:
     st.markdown("### 📋 使用说明")
     st.markdown("""
     **文件要求：**
-    - T+1/T+N: 捐赠项目、捐赠时间、捐赠金额
-    - 银行流水: 发生时间、收入、用途、附言
+    - 有益云数据: 直接从有益云导出的xls文件
+    - 银行流水: 包含发生时间、收入、用途、附言
+    
+    **自动识别规则：**
+    - 捐赠说明带【GFYH】→ T+N
+    - 捐赠说明不带【GFYH】→ T+1
     
     **对账逻辑：**
-    - 按日期汇总业务数据
-    - 从银行备注提取业务日期
+    - T+1: 到账日期 - 1天 = 业务日期
+    - T+N: 从银行备注提取业务日期
     - 差异<1元视为匹配
     """)
     
@@ -230,8 +240,23 @@ with st.sidebar:
     theme = st.selectbox("选择配色", ["默认紫色", "商务蓝", "清新绿"])
 
 
-def load_file(file):
-    """加载CSV或Excel文件"""
+def load_yiyun_file(file):
+    """加载有益云文件，自动跳过第一行"""
+    if file is None:
+        return None
+    try:
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file, skiprows=1)
+        else:
+            df = pd.read_excel(file, skiprows=1)
+        return df
+    except Exception as e:
+        st.error(f"有益云文件读取失败: {str(e)}")
+        return None
+
+
+def load_bank_file(file):
+    """加载银行流水文件"""
     if file is None:
         return None
     try:
@@ -241,8 +266,30 @@ def load_file(file):
             df = pd.read_excel(file)
         return df
     except Exception as e:
-        st.error(f"文件读取失败: {str(e)}")
+        st.error(f"银行流水文件读取失败: {str(e)}")
         return None
+
+
+def split_yiyun_data(df):
+    """
+    根据捐赠说明中是否包含【GFYH】来区分T+1和T+N数据
+    - 带【GFYH】的是 T+N
+    - 不带【GFYH】的是 T+1
+    """
+    df = df.copy()
+    
+    # 确保捐赠说明列存在
+    if '捐赠说明' not in df.columns:
+        st.error("有益云数据中缺少'捐赠说明'列")
+        return None, None
+    
+    # 根据捐赠说明区分
+    is_tn = df['捐赠说明'].astype(str).str.contains('GFYH', na=False)
+    
+    df_t1 = df[~is_tn].copy()
+    df_tn = df[is_tn].copy()
+    
+    return df_t1, df_tn
 
 
 def process_system_data(df_t1, df_tn):
@@ -287,7 +334,7 @@ def extract_business_date(row):
     """从银行备注中提取业务日期"""
     remark = str(row.get('附言', '')) + ' ' + str(row.get('用途', ''))
     
-    # 格式1: YYYYMMDD至YYYYMMDD
+    # 格式1: YYYYMMDD至YYYYMMDD (广发银行收单入账)
     pattern1 = r'(\d{4})(\d{2})(\d{2})至'
     match1 = re.search(pattern1, remark)
     if match1:
@@ -296,7 +343,7 @@ def extract_business_date(row):
         except:
             pass
     
-    # 格式2: MMDD_xxx
+    # 格式2: MMDD_xxx (财付通入账)
     pattern2 = r'^(\d{2})(\d{2})_'
     match2 = re.search(pattern2, remark.strip())
     if match2:
@@ -316,7 +363,14 @@ def extract_business_date(row):
 
 def process_bank_data(df_bank):
     """处理银行流水数据 - 保留每一笔用于匹配"""
+    df_bank = df_bank.copy()
+    
+    # 处理收入列（可能包含非数字值如 '-'）
+    df_bank['收入'] = pd.to_numeric(df_bank['收入'], errors='coerce').fillna(0)
+    
+    # 只保留有收入的记录
     df_bank = df_bank[df_bank['收入'] > 0].copy()
+    
     df_bank['发生时间'] = pd.to_datetime(df_bank['发生时间'], errors='coerce')
     df_bank['到账日期'] = df_bank['发生时间'].dt.date
     df_bank['银行摘要'] = df_bank.apply(
@@ -335,8 +389,6 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
     2. T+1 匹配不上的，在 T+N 中倒查（可能是前几天的业务）
     3. 按金额匹配（允许0.01误差）
     """
-    from datetime import timedelta
-    
     results = []
     
     # 创建 T+1 和 T+N 的字典，方便查找
@@ -368,7 +420,7 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
                 df_bank.loc[idx, '匹配来源'] = 'T+1'
                 t1_dict[biz_date]['已匹配'] = True
     
-    # 第二轮：T+N 匹配（倒查前N天）
+    # 第二轮：T+N 匹配（从银行备注提取业务日期，或倒查前N天）
     for idx, bank_row in df_bank.iterrows():
         if bank_row['已匹配']:
             continue
@@ -376,7 +428,21 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
         bank_amount = bank_row['收入']
         bank_date = bank_row['到账日期']
         
-        # T+N: 倒查前30天内的业务
+        # 尝试从银行备注中提取业务日期
+        biz_date_from_remark = extract_business_date(bank_row)
+        
+        if biz_date_from_remark and biz_date_from_remark in tn_dict and not tn_dict[biz_date_from_remark]['已匹配']:
+            tn_amount = tn_dict[biz_date_from_remark]['金额']
+            if np.isclose(bank_amount, tn_amount, atol=0.01):
+                # 匹配成功
+                days_diff = (pd.to_datetime(bank_date) - pd.to_datetime(biz_date_from_remark)).days
+                df_bank.loc[idx, '已匹配'] = True
+                df_bank.loc[idx, '匹配业务日期'] = biz_date_from_remark
+                df_bank.loc[idx, '匹配来源'] = f'T+{days_diff}'
+                tn_dict[biz_date_from_remark]['已匹配'] = True
+                continue
+        
+        # 如果备注中没有日期信息，倒查前30天内的业务
         for days_back in range(1, 31):
             biz_date = (pd.to_datetime(bank_date) - timedelta(days=days_back)).date()
             
@@ -569,7 +635,7 @@ def style_report(df):
     })
 
 
-def to_excel(df_report, pivot_df, df_bank_detail):
+def to_excel(df_report, pivot_df, df_bank_detail, df_t1, df_tn):
     """导出Excel"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -586,6 +652,14 @@ def to_excel(df_report, pivot_df, df_bank_detail):
         bank_cols = ['发生时间', '收入', '到账日期', '已匹配', '匹配业务日期', '匹配来源', '银行摘要']
         available_cols = [c for c in bank_cols if c in df_bank_detail.columns]
         df_bank_detail[available_cols].to_excel(writer, index=False, sheet_name='银行流水')
+        
+        # T+1 明细
+        if len(df_t1) > 0:
+            df_t1.to_excel(writer, index=False, sheet_name='T+1明细')
+        
+        # T+N 明细
+        if len(df_tn) > 0:
+            df_tn.to_excel(writer, index=False, sheet_name='T+N明细')
     
     return output.getvalue()
 
@@ -600,37 +674,44 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("##### 📄 有益云 T+1 数据")
-    file_t1 = st.file_uploader("t1", type=['csv', 'xlsx', 'xls'], key='t1', label_visibility="collapsed")
-    if file_t1:
-        df_preview = load_file(file_t1)
-        file_t1.seek(0)
+    st.markdown("##### 📄 有益云数据")
+    st.markdown("""
+    <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.5rem;">
+    直接上传有益云导出的文件，系统会自动识别：<br>
+    • 带【GFYH】→ T+N &nbsp;&nbsp;• 不带【GFYH】→ T+1
+    </div>
+    """, unsafe_allow_html=True)
+    file_yiyun = st.file_uploader("yiyun", type=['csv', 'xlsx', 'xls'], key='yiyun', label_visibility="collapsed")
+    if file_yiyun:
+        df_preview = load_yiyun_file(file_yiyun)
+        file_yiyun.seek(0)
         if df_preview is not None:
-            st.success(f"✓ {file_t1.name} ({len(df_preview)}行)")
+            # 统计T+1和T+N数量
+            is_tn = df_preview['捐赠说明'].astype(str).str.contains('GFYH', na=False)
+            t1_count = (~is_tn).sum()
+            tn_count = is_tn.sum()
+            st.success(f"✓ {file_yiyun.name} ({len(df_preview)}行: T+1 {t1_count}条, T+N {tn_count}条)")
 
 with col2:
-    st.markdown("##### 📄 有益云 T+N 数据")
-    file_tn = st.file_uploader("tn", type=['csv', 'xlsx', 'xls'], key='tn', label_visibility="collapsed")
-    if file_tn:
-        df_preview = load_file(file_tn)
-        file_tn.seek(0)
-        if df_preview is not None:
-            st.success(f"✓ {file_tn.name} ({len(df_preview)}行)")
-
-with col3:
     st.markdown("##### 🏦 银行流水")
+    st.markdown("""
+    <div style="font-size: 0.85rem; color: #666; margin-bottom: 0.5rem;">
+    上传银行导出的流水文件，需包含：<br>
+    发生时间、收入、用途、附言
+    </div>
+    """, unsafe_allow_html=True)
     file_bank = st.file_uploader("bank", type=['csv', 'xlsx', 'xls'], key='bank', label_visibility="collapsed")
     if file_bank:
-        df_preview = load_file(file_bank)
+        df_preview = load_bank_file(file_bank)
         file_bank.seek(0)
         if df_preview is not None:
             st.success(f"✓ {file_bank.name} ({len(df_preview)}行)")
 
 # 步骤2: 执行对账
-if file_t1 and file_tn and file_bank:
+if file_yiyun and file_bank:
     st.markdown("""
     <div class="step-header">
         <div class="step-number">2</div>
@@ -645,10 +726,20 @@ if file_t1 and file_tn and file_bank:
     if run_btn:
         with st.spinner("⏳ 正在分析数据..."):
             try:
-                # 加载和处理数据
-                df_t1 = load_file(file_t1)
-                df_tn = load_file(file_tn)
-                df_bank_raw = load_file(file_bank)
+                # 加载有益云数据
+                df_yiyun = load_yiyun_file(file_yiyun)
+                
+                # 自动区分T+1和T+N
+                df_t1, df_tn = split_yiyun_data(df_yiyun)
+                
+                if df_t1 is None or df_tn is None:
+                    st.error("数据分类失败，请检查有益云数据格式")
+                    st.stop()
+                
+                st.info(f"📊 数据识别结果: T+1 共 {len(df_t1)} 条, T+N 共 {len(df_tn)} 条")
+                
+                # 加载银行流水
+                df_bank_raw = load_bank_file(file_bank)
                 
                 # 处理业务数据 - 返回 T+1日汇总、T+N日汇总、项目明细、合并数据
                 df_t1_daily, df_tn_daily, df_by_project, df_combined = process_system_data(df_t1, df_tn)
@@ -731,7 +822,7 @@ if file_t1 and file_tn and file_bank:
                 st.markdown("<br>", unsafe_allow_html=True)
                 
                 # Tab切换展示
-                tab1, tab2, tab3 = st.tabs(["📋 对账汇总", "📊 项目明细（透视表）", "🏦 银行流水明细"])
+                tab1, tab2, tab3, tab4 = st.tabs(["📋 对账汇总", "📊 项目明细（透视表）", "🏦 银行流水明细", "📑 数据分类明细"])
                 
                 with tab1:
                     st.markdown("##### 按日期对账结果")
@@ -794,6 +885,23 @@ if file_t1 and file_tn and file_bank:
                     bank_display.columns = ['入账时间', '金额', '到账日期', '已匹配', '对应业务日期', '匹配来源', '摘要']
                     st.dataframe(bank_display, use_container_width=True, height=400)
                 
+                with tab4:
+                    st.markdown("##### 数据分类明细")
+                    
+                    col_t1, col_tn = st.columns(2)
+                    
+                    with col_t1:
+                        st.markdown(f"**T+1 数据** (共 {len(df_t1)} 条，不带【GFYH】)")
+                        if len(df_t1) > 0:
+                            t1_display = df_t1[['捐赠项目', '捐赠时间', '捐赠金额', '捐赠说明']].head(100)
+                            st.dataframe(t1_display, use_container_width=True, height=300)
+                    
+                    with col_tn:
+                        st.markdown(f"**T+N 数据** (共 {len(df_tn)} 条，带【GFYH】)")
+                        if len(df_tn) > 0:
+                            tn_display = df_tn[['捐赠项目', '捐赠时间', '捐赠金额', '捐赠说明']].head(100)
+                            st.dataframe(tn_display, use_container_width=True, height=300)
+                
                 # 下载按钮
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown("""
@@ -805,7 +913,7 @@ if file_t1 and file_tn and file_bank:
                 
                 col_dl = st.columns([1, 2, 1])
                 with col_dl[1]:
-                    excel_data = to_excel(df_report, pivot_df, df_bank_detail)
+                    excel_data = to_excel(df_report, pivot_df, df_bank_detail, df_t1, df_tn)
                     st.download_button(
                         label="📥 下载完整Excel报告",
                         data=excel_data,
@@ -821,30 +929,34 @@ if file_t1 and file_tn and file_bank:
 else:
     # 未上传完整文件时的提示
     st.markdown("<br>", unsafe_allow_html=True)
-    st.info("👆 请上传全部三个文件后开始对账")
+    st.info("👆 请上传有益云数据和银行流水文件后开始对账")
     
     # 示例数据格式
     with st.expander("📖 查看数据格式要求"):
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**业务系统数据 (T+1/T+N)**")
-            st.code("""
-捐赠项目,捐赠时间,捐赠金额
-爱心助学,2024-01-01 10:30,1000.00
-环保公益,2024-01-01 14:20,2000.00
+            st.markdown("**有益云数据**")
+            st.markdown("""
+            直接从有益云系统导出的 Excel/CSV 文件
+            
+            系统会自动根据**捐赠说明**字段区分：
+            - 带 `【GFYH】` → **T+N** (广发银行收款)
+            - 不带 `【GFYH】` → **T+1** (财付通收款)
             """)
         with col2:
             st.markdown("**银行流水**")
-            st.code("""
-发生时间,收入,用途,附言
-2024-01-03,3000.00,捐款,0101_xxx
-2024-01-04,5000.00,入账,20240102至20240102
+            st.markdown("""
+            银行导出的流水文件，需包含以下列：
+            - `发生时间` - 银行入账时间
+            - `收入` - 入账金额
+            - `用途` - 交易用途
+            - `附言` - 附言信息（用于提取业务日期）
             """)
 
 # 页脚
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #999; padding: 1rem;'>
-    💡 财务对账工具 v2.0 | 支持 CSV / Excel | 差异<1元视为匹配
+    💡 财务对账工具 v3.0 | 支持自动识别T+1/T+N | 差异<1元视为匹配
 </div>
 """, unsafe_allow_html=True)
