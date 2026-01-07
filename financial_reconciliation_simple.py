@@ -344,7 +344,7 @@ def extract_biz_date_from_remark(remark, bank_date):
 
 
 def reconcile_each_bank_row(df_yiyun, df_bank):
-    """核心对账逻辑 - 逐笔银行流水核对，增加交易笔数"""
+    """核心对账逻辑 - 逐笔银行流水核对，增加交易笔数，支持月捐968结尾特殊匹配"""
     
     # 处理有益云数据
     df_yiyun = df_yiyun.copy()
@@ -356,7 +356,30 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
     df_t1 = df_yiyun[~is_gfyh].copy()
     df_tn = df_yiyun[is_gfyh].copy()
     
-    # T+1 按日期汇总（包含笔数）
+    # 在T+1中识别月捐
+    df_t1['是否月捐'] = df_t1['捐赠说明'].astype(str).str.contains('月捐', na=False)
+    df_t1_monthly = df_t1[df_t1['是否月捐']].copy()
+    df_t1_regular = df_t1[~df_t1['是否月捐']].copy()
+    
+    # T+1 月捐按日期汇总
+    t1_monthly_daily = df_t1_monthly.groupby('业务日期').agg({
+        '捐赠金额': 'sum',
+        '捐赠项目': 'count'
+    }).reset_index()
+    t1_monthly_daily.columns = ['业务日期', '金额', '笔数']
+    t1_monthly_dict = {row['业务日期']: {'金额': round(row['金额'], 2), '笔数': int(row['笔数']), '已匹配': False}
+                       for _, row in t1_monthly_daily.iterrows()}
+    
+    # T+1 常规按日期汇总
+    t1_regular_daily = df_t1_regular.groupby('业务日期').agg({
+        '捐赠金额': 'sum',
+        '捐赠项目': 'count'
+    }).reset_index()
+    t1_regular_daily.columns = ['业务日期', '金额', '笔数']
+    t1_regular_dict = {row['业务日期']: {'金额': round(row['金额'], 2), '笔数': int(row['笔数']), '已匹配': False}
+                       for _, row in t1_regular_daily.iterrows()}
+    
+    # T+1 总汇总（用于向后兼容）
     t1_daily = df_t1.groupby('业务日期').agg({
         '捐赠金额': 'sum',
         '捐赠项目': 'count'
@@ -391,6 +414,7 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
         bank_date = bank_row['到账日期']
         bank_amount = round(bank_row['收入'], 2)
         bank_remark = str(bank_row['备注'])
+        bank_fuyan = str(bank_row.get('附言', ''))
         
         row_data = {
             '序号': idx + 1,
@@ -409,7 +433,46 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
         # 第一步：尝试匹配 T+1
         t1_biz_date = (pd.to_datetime(bank_date) - timedelta(days=1)).date()
         
-        if t1_biz_date in t1_dict and not t1_dict[t1_biz_date]['已匹配']:
+        # 检查是否968结尾（月捐汇总）
+        is_monthly_968 = re.search(r'968\s*$', bank_fuyan.strip())
+        
+        if is_monthly_968:
+            # 优先匹配月捐
+            if t1_biz_date in t1_monthly_dict and not t1_monthly_dict[t1_biz_date]['已匹配']:
+                monthly_info = t1_monthly_dict[t1_biz_date]
+                if bank_amount == monthly_info['金额']:
+                    row_data['匹配类型'] = 'T+1(月捐)'
+                    row_data['交易笔数'] = monthly_info['笔数']
+                    row_data['匹配业务日期'] = t1_biz_date
+                    row_data['系统金额'] = monthly_info['金额']
+                    row_data['状态'] = '✅ 匹配'
+                    t1_monthly_dict[t1_biz_date]['已匹配'] = True
+                    # 同时标记总汇总已匹配
+                    if t1_biz_date in t1_dict:
+                        # 如果只有月捐，标记整体已匹配
+                        if t1_biz_date not in t1_regular_dict or t1_regular_dict.get(t1_biz_date, {}).get('金额', 0) == 0:
+                            t1_dict[t1_biz_date]['已匹配'] = True
+                    matched = True
+        else:
+            # 非968结尾，匹配常规T+1
+            if t1_biz_date in t1_regular_dict and not t1_regular_dict[t1_biz_date]['已匹配']:
+                regular_info = t1_regular_dict[t1_biz_date]
+                if bank_amount == regular_info['金额']:
+                    row_data['匹配类型'] = 'T+1'
+                    row_data['交易笔数'] = regular_info['笔数']
+                    row_data['匹配业务日期'] = t1_biz_date
+                    row_data['系统金额'] = regular_info['金额']
+                    row_data['状态'] = '✅ 匹配'
+                    t1_regular_dict[t1_biz_date]['已匹配'] = True
+                    # 检查该日期的月捐是否也已匹配
+                    if t1_biz_date in t1_dict:
+                        monthly_matched = t1_monthly_dict.get(t1_biz_date, {}).get('已匹配', True)
+                        if monthly_matched or t1_biz_date not in t1_monthly_dict:
+                            t1_dict[t1_biz_date]['已匹配'] = True
+                    matched = True
+        
+        # 如果上面的细分匹配失败，尝试用总金额匹配（向后兼容）
+        if not matched and t1_biz_date in t1_dict and not t1_dict[t1_biz_date]['已匹配']:
             t1_info = t1_dict[t1_biz_date]
             if bank_amount == t1_info['金额']:
                 row_data['匹配类型'] = 'T+1'
@@ -549,7 +612,12 @@ with col1:
         file_yiyun.seek(0)
         if df_yiyun_preview is not None:
             is_gfyh = df_yiyun_preview['捐赠说明'].astype(str).str.contains('GFYH', na=False)
-            st.success(f"✅ 共 {len(df_yiyun_preview)} 条 | T+1: {(~is_gfyh).sum()} 条 | T+N: {is_gfyh.sum()} 条")
+            t1_count = (~is_gfyh).sum()
+            tn_count = is_gfyh.sum()
+            # 统计T+1中的月捐数量
+            is_monthly = df_yiyun_preview[~is_gfyh]['捐赠说明'].astype(str).str.contains('月捐', na=False)
+            monthly_count = is_monthly.sum()
+            st.success(f"✅ 共 {len(df_yiyun_preview)} 条 | T+1: {t1_count} 条 (月捐: {monthly_count} 条) | T+N: {tn_count} 条")
 
 with col2:
     st.markdown("""

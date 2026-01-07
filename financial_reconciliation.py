@@ -293,13 +293,36 @@ def split_yiyun_data(df):
 
 
 def process_system_data(df_t1, df_tn):
-    """处理业务系统数据 - 分别处理T+1和T+N"""
+    """处理业务系统数据 - 分别处理T+1和T+N，并单独统计月捐"""
     # 处理 T+1 数据
     df_t1 = df_t1.copy()
     df_t1['捐赠时间'] = pd.to_datetime(df_t1['捐赠时间'], errors='coerce')
     df_t1['业务日期'] = df_t1['捐赠时间'].dt.date
     
-    # T+1 按日期汇总
+    # 识别月捐数据（捐赠说明中包含"月捐"）
+    df_t1['是否月捐'] = df_t1['捐赠说明'].astype(str).str.contains('月捐', na=False)
+    
+    # 分离月捐和非月捐数据
+    df_t1_monthly = df_t1[df_t1['是否月捐']].copy()
+    df_t1_regular = df_t1[~df_t1['是否月捐']].copy()
+    
+    # T+1 月捐按日期汇总
+    df_t1_monthly_daily = df_t1_monthly.groupby('业务日期').agg({
+        '捐赠金额': 'sum',
+        '捐赠项目': 'count'
+    }).reset_index()
+    df_t1_monthly_daily.columns = ['业务日期', '金额', '笔数']
+    df_t1_monthly_daily['来源'] = 'T+1_月捐'
+    
+    # T+1 常规按日期汇总
+    df_t1_regular_daily = df_t1_regular.groupby('业务日期').agg({
+        '捐赠金额': 'sum',
+        '捐赠项目': 'count'
+    }).reset_index()
+    df_t1_regular_daily.columns = ['业务日期', '金额', '笔数']
+    df_t1_regular_daily['来源'] = 'T+1'
+    
+    # T+1 总汇总（用于向后兼容）
     df_t1_daily = df_t1.groupby('业务日期').agg({
         '捐赠金额': 'sum',
         '捐赠项目': 'count'
@@ -327,7 +350,7 @@ def process_system_data(df_t1, df_tn):
     }).reset_index()
     df_by_project.columns = ['项目名称', '业务日期', '金额']
     
-    return df_t1_daily, df_tn_daily, df_by_project, df_combined
+    return df_t1_daily, df_tn_daily, df_by_project, df_combined, df_t1_monthly_daily, df_t1_regular_daily
 
 
 def extract_business_date(row):
@@ -380,33 +403,44 @@ def process_bank_data(df_bank):
     return df_bank
 
 
-def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
+def reconcile_data(df_t1_daily, df_tn_daily, df_bank, df_t1_monthly_daily, df_t1_regular_daily):
     """
     核心对账逻辑 - 每日一行结果，分别显示T+1和T+N的匹配状态
     
-    逻辑：
-    1. 按业务日期汇总，每天只显示一行
-    2. 分别检查 T+1 和 T+N 的匹配情况
-    3. 金额必须完全相等才算匹配
+    特殊处理：
+    1. 识别968结尾的银行流水（月捐T+1汇总）
+    2. 单独匹配前一天的月捐数据
+    3. 从T+1汇总中扣除月捐后，再匹配剩余流水
     """
     
-    # 创建 T+1 和 T+N 的字典，方便查找
+    # 创建月捐和常规T+1的字典
+    t1_monthly_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数']} 
+                       for _, row in df_t1_monthly_daily.iterrows()}
+    t1_regular_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数']} 
+                       for _, row in df_t1_regular_daily.iterrows()}
     t1_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数']} 
                for _, row in df_t1_daily.iterrows()}
     tn_dict = {row['业务日期']: {'金额': row['金额'], '笔数': row['笔数']} 
                for _, row in df_tn_daily.iterrows()}
     
-    # 按到账日期汇总银行流水
-    bank_by_date = df_bank.groupby('到账日期').agg({
-        '收入': list  # 保留所有金额用于匹配
-    }).to_dict()['收入']
+    # 将银行流水按到账日期分组，同时保留附言信息用于识别968
+    bank_detail_by_date = {}
+    for _, row in df_bank.iterrows():
+        bank_date = row['到账日期']
+        if bank_date not in bank_detail_by_date:
+            bank_detail_by_date[bank_date] = []
+        bank_detail_by_date[bank_date].append({
+            '金额': row['收入'],
+            '附言': str(row.get('附言', '')),
+            '用途': str(row.get('用途', ''))
+        })
     
     # 收集所有业务日期
     all_biz_dates = set(t1_dict.keys()) | set(tn_dict.keys())
     
     # 记录匹配结果
     results = []
-    matched_bank_amounts = {}  # 记录已匹配的银行金额 {到账日期: [已匹配金额列表]}
+    matched_bank_records = {}  # 记录已匹配的银行流水 {到账日期: [已匹配的记录索引]}
     
     for biz_date in sorted(all_biz_dates):
         row_data = {
@@ -433,30 +467,79 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
             # T+1: 到账日期 = 业务日期 + 1天
             expected_bank_date = (pd.to_datetime(biz_date) + timedelta(days=1)).date()
             
-            if expected_bank_date in bank_by_date:
-                bank_amounts = bank_by_date[expected_bank_date]
-                # 查找已匹配的金额
-                matched_for_date = matched_bank_amounts.get(expected_bank_date, [])
+            if expected_bank_date in bank_detail_by_date:
+                bank_records = bank_detail_by_date[expected_bank_date]
+                matched_indices = matched_bank_records.get(expected_bank_date, [])
                 
-                # 查找完全匹配的金额
-                t1_amount = round(t1_info['金额'], 2)
-                matched = False
-                for amt in bank_amounts:
-                    amt_rounded = round(amt, 2)
-                    if amt_rounded == t1_amount and amt not in matched_for_date:
-                        # 完全匹配
-                        row_data['T+1_银行实收'] = amt
-                        row_data['T+1_到账日期'] = expected_bank_date
-                        row_data['T+1_状态'] = '✅ 匹配'
-                        # 记录已匹配
-                        if expected_bank_date not in matched_bank_amounts:
-                            matched_bank_amounts[expected_bank_date] = []
-                        matched_bank_amounts[expected_bank_date].append(amt)
-                        matched = True
-                        break
+                # 第一步：检查968结尾的月捐汇总
+                monthly_amount = t1_monthly_dict.get(biz_date, {}).get('金额', 0)
+                monthly_matched_idx = None
                 
-                if not matched:
-                    row_data['T+1_状态'] = '❌ 未匹配'
+                if monthly_amount &gt; 0:
+                    monthly_amount_rounded = round(monthly_amount, 2)
+                    for idx, record in enumerate(bank_records):
+                        if idx in matched_indices:
+                            continue
+                        # 检查是否968结尾
+                        remark = record['附言']
+                        if re.search(r'968\s*$', remark.strip()):
+                            amt_rounded = round(record['金额'], 2)
+                            if amt_rounded == monthly_amount_rounded:
+                                # 匹配到月捐汇总
+                                monthly_matched_idx = idx
+                                if expected_bank_date not in matched_bank_records:
+                                    matched_bank_records[expected_bank_date] = []
+                                matched_bank_records[expected_bank_date].append(idx)
+                                break
+                
+                # 第二步：匹配常规T+1（扣除月捐后的金额）
+                regular_amount = t1_regular_dict.get(biz_date, {}).get('金额', 0)
+                regular_matched = False
+                
+                if regular_amount &gt; 0:
+                    regular_amount_rounded = round(regular_amount, 2)
+                    for idx, record in enumerate(bank_records):
+                        if idx in matched_indices:
+                            continue
+                        # 非968结尾
+                        remark = record['附言']
+                        if not re.search(r'968\s*$', remark.strip()):
+                            amt_rounded = round(record['金额'], 2)
+                            if amt_rounded == regular_amount_rounded:
+                                # 匹配到常规T+1
+                                row_data['T+1_银行实收'] = record['金额']
+                                row_data['T+1_到账日期'] = expected_bank_date
+                                row_data['T+1_状态'] = '✅ 匹配'
+                                regular_matched = True
+                                if expected_bank_date not in matched_bank_records:
+                                    matched_bank_records[expected_bank_date] = []
+                                matched_bank_records[expected_bank_date].append(idx)
+                                break
+                
+                # 如果只有月捐，没有常规T+1
+                if monthly_amount &gt; 0 and regular_amount == 0 and monthly_matched_idx is not None:
+                    row_data['T+1_银行实收'] = bank_records[monthly_matched_idx]['金额']
+                    row_data['T+1_到账日期'] = expected_bank_date
+                    row_data['T+1_状态'] = '✅ 匹配(月捐)'
+                    regular_matched = True
+                
+                # 如果都没匹配上，尝试用总金额匹配（向后兼容）
+                if not regular_matched:
+                    t1_amount = round(t1_info['金额'], 2)
+                    for idx, record in enumerate(bank_records):
+                        if idx in matched_indices:
+                            continue
+                        amt_rounded = round(record['金额'], 2)
+                        if amt_rounded == t1_amount:
+                            row_data['T+1_银行实收'] = record['金额']
+                            row_data['T+1_到账日期'] = expected_bank_date
+                            row_data['T+1_状态'] = '✅ 匹配'
+                            if expected_bank_date not in matched_bank_records:
+                                matched_bank_records[expected_bank_date] = []
+                            matched_bank_records[expected_bank_date].append(idx)
+                            break
+                    else:
+                        row_data['T+1_状态'] = '❌ 未匹配'
             else:
                 row_data['T+1_状态'] = '❌ 未到账'
         
@@ -473,22 +556,24 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
             for days_after in range(1, 31):
                 expected_bank_date = (pd.to_datetime(biz_date) + timedelta(days=days_after)).date()
                 
-                if expected_bank_date in bank_by_date:
-                    bank_amounts = bank_by_date[expected_bank_date]
-                    matched_for_date = matched_bank_amounts.get(expected_bank_date, [])
+                if expected_bank_date in bank_detail_by_date:
+                    bank_records = bank_detail_by_date[expected_bank_date]
+                    matched_indices = matched_bank_records.get(expected_bank_date, [])
                     
-                    for amt in bank_amounts:
-                        amt_rounded = round(amt, 2)
-                        if amt_rounded == tn_amount and amt not in matched_for_date:
+                    for idx, record in enumerate(bank_records):
+                        if idx in matched_indices:
+                            continue
+                        amt_rounded = round(record['金额'], 2)
+                        if amt_rounded == tn_amount:
                             # 完全匹配
-                            row_data['T+N_银行实收'] = amt
+                            row_data['T+N_银行实收'] = record['金额']
                             row_data['T+N_到账日期'] = expected_bank_date
                             row_data['T+N_到账天数'] = days_after
                             row_data['T+N_状态'] = f'✅ T+{days_after}'
                             # 记录已匹配
-                            if expected_bank_date not in matched_bank_amounts:
-                                matched_bank_amounts[expected_bank_date] = []
-                            matched_bank_amounts[expected_bank_date].append(amt)
+                            if expected_bank_date not in matched_bank_records:
+                                matched_bank_records[expected_bank_date] = []
+                            matched_bank_records[expected_bank_date].append(idx)
                             matched = True
                             break
                 
@@ -502,15 +587,15 @@ def reconcile_data(df_t1_daily, df_tn_daily, df_bank):
     
     # 查找未匹配的银行流水
     unmatched_bank = []
-    for bank_date, amounts in bank_by_date.items():
-        matched_for_date = matched_bank_amounts.get(bank_date, [])
-        for amt in amounts:
-            if amt not in matched_for_date:
+    for bank_date, records in bank_detail_by_date.items():
+        matched_indices = matched_bank_records.get(bank_date, [])
+        for idx, record in enumerate(records):
+            if idx not in matched_indices:
                 unmatched_bank.append({
                     '业务日期': None,
                     'T+1_系统应收': 0,
                     'T+1_笔数': 0,
-                    'T+1_银行实收': amt,
+                    'T+1_银行实收': record['金额'],
                     'T+1_到账日期': bank_date,
                     'T+1_状态': '⚠️ 无业务',
                     'T+N_系统应收': 0,
@@ -720,7 +805,10 @@ with col1:
             is_tn = df_preview['捐赠说明'].astype(str).str.contains('GFYH', na=False)
             t1_count = (~is_tn).sum()
             tn_count = is_tn.sum()
-            st.success(f"✓ {file_yiyun.name} ({len(df_preview)}行: T+1 {t1_count}条, T+N {tn_count}条)")
+            # 统计T+1中的月捐数量
+            is_monthly = df_preview[~is_tn]['捐赠说明'].astype(str).str.contains('月捐', na=False)
+            monthly_count = is_monthly.sum()
+            st.success(f"✓ {file_yiyun.name} ({len(df_preview)}行: T+1 {t1_count}条 (月捐: {monthly_count}条), T+N {tn_count}条)")
 
 with col2:
     st.markdown("##### 🏦 银行流水")
@@ -768,14 +856,14 @@ if file_yiyun and file_bank:
                 # 加载银行流水
                 df_bank_raw = load_bank_file(file_bank)
                 
-                # 处理业务数据 - 返回 T+1日汇总、T+N日汇总、项目明细、合并数据
-                df_t1_daily, df_tn_daily, df_by_project, df_combined = process_system_data(df_t1, df_tn)
+                # 处理业务数据 - 返回 T+1日汇总、T+N日汇总、项目明细、合并数据、月捐汇总、常规T+1汇总
+                df_t1_daily, df_tn_daily, df_by_project, df_combined, df_t1_monthly_daily, df_t1_regular_daily = process_system_data(df_t1, df_tn)
                 
                 # 处理银行流水
                 df_bank = process_bank_data(df_bank_raw)
                 
-                # 执行对账 - 从银行流水出发匹配业务
-                df_report, df_bank_detail = reconcile_data(df_t1_daily, df_tn_daily, df_bank)
+                # 执行对账 - 从银行流水出发匹配业务，支持月捐单独匹配
+                df_report, df_bank_detail = reconcile_data(df_t1_daily, df_tn_daily, df_bank, df_t1_monthly_daily, df_t1_regular_daily)
                 
                 # 创建透视表
                 pivot_df, date_status = create_pivot_table(df_by_project, df_report)
