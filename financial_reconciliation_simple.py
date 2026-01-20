@@ -271,6 +271,63 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display: none;}
+    
+    /* 自定义 Tab 按钮样式 */
+    div[data-testid="column"] button {
+        font-weight: 600;
+        border-radius: 8px;
+        transition: all 0.3s ease;
+        border: 2px solid transparent;
+    }
+    
+    div[data-testid="column"] button[kind="primary"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-color: #667eea;
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    
+    div[data-testid="column"] button[kind="secondary"] {
+        background: white;
+        color: #64748b;
+        border-color: #e2e8f0;
+    }
+    
+    div[data-testid="column"] button[kind="secondary"]:hover {
+        border-color: #667eea;
+        color: #667eea;
+        transform: translateY(-1px);
+    }
+    
+    /* Form 样式优化 */
+    .stForm {
+        background: #f8fafc;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+    }
+    
+    /* 日期输入框样式 */
+    .stDateInput > div > div {
+        border-radius: 8px;
+    }
+    
+    /* 表格工具栏按钮始终显示 */
+    div[data-testid="stDataFrameResizable"] div[data-testid="stElementToolbar"] {
+        opacity: 1 !important;
+        visibility: visible !important;
+        display: flex !important;
+    }
+    
+    div[data-testid="stDataFrameResizable"] div[data-testid="stElementToolbar"] button {
+        opacity: 1 !important;
+        visibility: visible !important;
+    }
+    
+    /* 确保工具栏容器始终可见 */
+    div[data-testid="stElementToolbarContainer"] {
+        opacity: 1 !important;
+        visibility: visible !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -642,6 +699,7 @@ with st.expander("📖 查看对账规则", expanded=False):
     - **匹配条件**：金额必须 **完全相等** 才算匹配成功
     """)
 
+
 # 开始对账
 if file_yiyun and file_bank:
     col_btn = st.columns([1, 2, 1])
@@ -656,153 +714,295 @@ if file_yiyun and file_bank:
             df_result, df_unmatched, df_project, df_bank_processed, t1_count, tn_count = reconcile_each_bank_row(df_yiyun, df_bank)
             pivot_df = create_project_pivot(df_project)
             
-            # 统计
-            total_bank_rows = len(df_result)
-            matched_rows = len(df_result[df_result['状态'].str.contains('✅')])
-            unmatched_bank_rows = total_bank_rows - matched_rows
-            unmatched_biz_count = len(df_unmatched)
+            # 保存到 session_state
+            st.session_state.reconcile_done = True
+            st.session_state.df_result = df_result
+            st.session_state.df_unmatched = df_unmatched
+            st.session_state.df_project = df_project
+            st.session_state.df_bank_processed = df_bank_processed
+            st.session_state.pivot_df = pivot_df
+            st.session_state.t1_count = t1_count
+            st.session_state.tn_count = tn_count
+            st.session_state.df_yiyun = df_yiyun
+            st.session_state.df_bank = df_bank
             
-            total_bank_amount = df_result['银行金额'].sum()
-            matched_amount = df_result[df_result['状态'].str.contains('✅')]['银行金额'].sum()
-            unmatched_bank_amount = total_bank_amount - matched_amount
-            unmatched_biz_amount = df_unmatched['系统金额'].sum() if len(df_unmatched) > 0 else 0
-            
-            # 统计卡片
-            st.markdown("### 📊 对账结果")
-            
+            # 对账完成后跳转到第一个页签
+            st.query_params["tab"] = "0"
+            st.rerun()
+
+# 显示对账结果（从 session_state 读取）
+if st.session_state.get('reconcile_done', False):
+    df_result = st.session_state.df_result
+    df_unmatched = st.session_state.df_unmatched
+    df_project = st.session_state.df_project
+    df_bank_processed = st.session_state.df_bank_processed
+    pivot_df = st.session_state.pivot_df
+    t1_count = st.session_state.t1_count
+    tn_count = st.session_state.tn_count
+    df_yiyun = st.session_state.df_yiyun
+    df_bank = st.session_state.df_bank
+    
+    # 统计
+    total_bank_rows = len(df_result)
+    matched_rows = len(df_result[df_result['状态'].str.contains('✅')])
+    unmatched_bank_rows = total_bank_rows - matched_rows
+    unmatched_biz_count = len(df_unmatched)
+    
+    total_bank_amount = df_result['银行金额'].sum()
+    matched_amount = df_result[df_result['状态'].str.contains('✅')]['银行金额'].sum()
+    unmatched_bank_amount = total_bank_amount - matched_amount
+    unmatched_biz_amount = df_unmatched['系统金额'].sum() if len(df_unmatched) > 0 else 0
+    
+    # 统计卡片
+    st.markdown("### 📊 对账结果")
+    
+    st.markdown(f"""
+    <div class="stats-grid">
+        <div class="stat-card success">
+            <div class="stat-icon">✅</div>
+            <div class="stat-value">{matched_rows}</div>
+            <div class="stat-label">匹配成功</div>
+        </div>
+        <div class="stat-card danger">
+            <div class="stat-icon">❌</div>
+            <div class="stat-value">{unmatched_bank_rows}</div>
+            <div class="stat-label">未匹配流水</div>
+        </div>
+        <div class="stat-card warning">
+            <div class="stat-icon">⚠️</div>
+            <div class="stat-value">{unmatched_biz_count}</div>
+            <div class="stat-label">未到账业务</div>
+        </div>
+        <div class="stat-card info">
+            <div class="stat-icon">💰</div>
+            <div class="stat-value">¥{matched_amount:,.0f}</div>
+            <div class="stat-label">已匹配金额</div>
+        </div>
+        <div class="stat-card purple">
+            <div class="stat-icon">🏦</div>
+            <div class="stat-value">¥{unmatched_bank_amount:,.0f}</div>
+            <div class="stat-label">未匹配金额</div>
+        </div>
+        <div class="stat-card warning">
+            <div class="stat-icon">📋</div>
+            <div class="stat-value">¥{unmatched_biz_amount:,.0f}</div>
+            <div class="stat-label">未到账金额</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Tab展示 - 使用 query params 记住当前选中的 tab
+    # 从 URL 参数获取当前 tab，如果没有则默认为 0
+    query_params = st.query_params
+    default_tab = int(query_params.get("tab", 0))
+    
+    tab_names = [
+        f"📋 逐笔核对 ({total_bank_rows})", 
+        f"❌ 未匹配 ({unmatched_bank_rows})", 
+        f"⚠️ 未到账 ({unmatched_biz_count})",
+        "📊 项目明细",
+        "📅 每日汇总"
+    ]
+    
+    # 为每个 tab 创建一个按钮来切换
+    tab_cols = st.columns(5)
+    selected_tab = default_tab
+    
+    for idx, (col, name) in enumerate(zip(tab_cols, tab_names)):
+        with col:
+            if st.button(name, key=f"tab_btn_{idx}", use_container_width=True, 
+                        type="primary" if idx == default_tab else "secondary"):
+                selected_tab = idx
+                st.query_params["tab"] = str(idx)
+                st.rerun()
+    
+    st.markdown("---")
+    
+    # 根据选中的 tab 显示内容
+    if selected_tab == 0:
+        st.markdown("""
+        <div class="table-title">银行流水逐笔对账结果</div>
+        <div class="table-subtitle">每笔银行流水一行，包含匹配类型和对应的业务交易笔数</div>
+        """, unsafe_allow_html=True)
+        
+        display_df = df_result.copy()
+        display_df['到账日期'] = pd.to_datetime(display_df['到账日期']).dt.strftime('%Y-%m-%d')
+        display_df['匹配业务日期'] = pd.to_datetime(display_df['匹配业务日期']).dt.strftime('%Y-%m-%d')
+        display_df['匹配业务日期'] = display_df['匹配业务日期'].fillna('-')
+        
+        def highlight_status(row):
+            if '✅' in str(row['状态']):
+                return ['background-color: #dcfce7; color: #166534;'] * len(row)
+            else:
+                return ['background-color: #fee2e2; color: #991b1b;'] * len(row)
+        
+        styled_df = display_df.style.apply(highlight_status, axis=1).format({
+            '银行金额': '¥{:,.2f}',
+            '系统金额': '¥{:,.2f}'
+        })
+        
+        st.dataframe(styled_df, use_container_width=True, height=500)
+    
+    elif selected_tab == 1:
+        df_unmatched_bank = df_result[df_result['状态'].str.contains('未匹配')].copy()
+        
+        if len(df_unmatched_bank) == 0:
+            st.markdown("""
+            <div class="success-banner">
+                <div class="icon">🎉</div>
+                <div class="text">太棒了！所有银行流水都已匹配成功！</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
             st.markdown(f"""
-            <div class="stats-grid">
-                <div class="stat-card success">
-                    <div class="stat-icon">✅</div>
-                    <div class="stat-value">{matched_rows}</div>
-                    <div class="stat-label">匹配成功</div>
-                </div>
-                <div class="stat-card danger">
-                    <div class="stat-icon">❌</div>
-                    <div class="stat-value">{unmatched_bank_rows}</div>
-                    <div class="stat-label">未匹配流水</div>
-                </div>
-                <div class="stat-card warning">
-                    <div class="stat-icon">⚠️</div>
-                    <div class="stat-value">{unmatched_biz_count}</div>
-                    <div class="stat-label">未到账业务</div>
-                </div>
-                <div class="stat-card info">
-                    <div class="stat-icon">💰</div>
-                    <div class="stat-value">¥{matched_amount:,.0f}</div>
-                    <div class="stat-label">已匹配金额</div>
-                </div>
-                <div class="stat-card purple">
-                    <div class="stat-icon">🏦</div>
-                    <div class="stat-value">¥{unmatched_bank_amount:,.0f}</div>
-                    <div class="stat-label">未匹配金额</div>
-                </div>
-                <div class="stat-card warning">
-                    <div class="stat-icon">📋</div>
-                    <div class="stat-value">¥{unmatched_biz_amount:,.0f}</div>
-                    <div class="stat-label">未到账金额</div>
-                </div>
+            <div class="error-banner">
+                <p>❌ 共有 <strong>{len(df_unmatched_bank)}</strong> 笔银行流水未匹配，合计 <strong>¥{df_unmatched_bank['银行金额'].sum():,.2f}</strong></p>
+                <p style="font-size: 0.9rem; color: #7f1d1d; margin-top: 0.5rem;">这些银行收款在有益云系统中没有找到对应的业务记录</p>
             </div>
             """, unsafe_allow_html=True)
             
-            # Tab展示
-            tab1, tab2, tab3, tab4 = st.tabs([
-                f"📋 逐笔核对 ({total_bank_rows})", 
-                f"❌ 未匹配 ({unmatched_bank_rows})", 
-                f"⚠️ 未到账 ({unmatched_biz_count})",
-                "📊 项目明细"
-            ])
+            df_unmatched_bank['到账日期'] = pd.to_datetime(df_unmatched_bank['到账日期']).dt.strftime('%Y-%m-%d')
+            st.dataframe(df_unmatched_bank.style.format({
+                '银行金额': '¥{:,.2f}',
+                '系统金额': '¥{:,.2f}'
+            }), use_container_width=True)
+    
+    elif selected_tab == 2:
+        if len(df_unmatched) == 0:
+            st.markdown("""
+            <div class="success-banner">
+                <div class="icon">🎉</div>
+                <div class="text">太棒了！所有业务都已到账！</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning(f"⚠️ 共有 {len(df_unmatched)} 条业务未到账，合计 ¥{unmatched_biz_amount:,.2f}")
             
-            with tab1:
-                st.markdown("""
-                <div class="table-title">银行流水逐笔对账结果</div>
-                <div class="table-subtitle">每笔银行流水一行，包含匹配类型和对应的业务交易笔数</div>
-                """, unsafe_allow_html=True)
-                
-                display_df = df_result.copy()
-                display_df['到账日期'] = pd.to_datetime(display_df['到账日期']).dt.strftime('%Y-%m-%d')
-                display_df['匹配业务日期'] = pd.to_datetime(display_df['匹配业务日期']).dt.strftime('%Y-%m-%d')
-                display_df['匹配业务日期'] = display_df['匹配业务日期'].fillna('-')
-                
-                def highlight_status(row):
-                    if '✅' in str(row['状态']):
-                        return ['background-color: #dcfce7; color: #166534;'] * len(row)
-                    else:
-                        return ['background-color: #fee2e2; color: #991b1b;'] * len(row)
-                
-                styled_df = display_df.style.apply(highlight_status, axis=1).format({
-                    '银行金额': '¥{:,.2f}',
-                    '系统金额': '¥{:,.2f}'
-                })
-                
-                st.dataframe(styled_df, use_container_width=True, height=500)
+            display_unmatched = df_unmatched.copy()
+            display_unmatched['业务日期'] = pd.to_datetime(display_unmatched['业务日期']).dt.strftime('%Y-%m-%d')
+            display_unmatched['预计到账日期'] = display_unmatched['预计到账日期'].apply(
+                lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if x != '-' else '-'
+            )
             
-            with tab2:
-                df_unmatched_bank = df_result[df_result['状态'].str.contains('未匹配')].copy()
+            st.dataframe(display_unmatched.style.format({
+                '系统金额': '¥{:,.2f}'
+            }), use_container_width=True)
+    
+    elif selected_tab == 3:
+        st.markdown("""
+        <div class="table-title">项目每日捐赠明细</div>
+        <div class="table-subtitle">按项目分组，展示每天的捐赠金额</div>
+        """, unsafe_allow_html=True)
+        
+        st.dataframe(pivot_df.style.format('{:,.2f}'), use_container_width=True, height=500)
+        
+        st.info(f"📌 共 **{len(pivot_df)}** 个项目，总金额 **¥{pivot_df['合计'].sum():,.2f}**")
+    
+    elif selected_tab == 4:
+        st.markdown("""
+        <div class="table-title">📅 每日捐赠汇总统计</div>
+        <div class="table-subtitle">按日期范围筛选，查看各项目的捐赠笔数和金额汇总</div>
+        """, unsafe_allow_html=True)
+        
+        # 准备数据
+        df_daily = df_yiyun.copy()
+        df_daily['捐赠时间'] = pd.to_datetime(df_daily['捐赠时间'], errors='coerce')
+        df_daily['日期'] = df_daily['捐赠时间'].dt.date
+        
+        # 获取日期范围
+        min_date = df_daily['日期'].min()
+        max_date = df_daily['日期'].max()
+        
+        # 初始化 session_state
+        if 'daily_start_date' not in st.session_state:
+            st.session_state.daily_start_date = min_date
+        if 'daily_end_date' not in st.session_state:
+            st.session_state.daily_end_date = max_date
+        
+        # 使用 form 来避免每次输入都刷新
+        with st.form(key='date_filter_form'):
+            st.markdown("##### 📆 选择日期范围")
+            col_date1, col_date2, col_date3 = st.columns([3, 3, 2])
+            with col_date1:
+                start_date = st.date_input(
+                    "开始日期", 
+                    value=st.session_state.daily_start_date, 
+                    min_value=min_date, 
+                    max_value=max_date
+                )
                 
-                if len(df_unmatched_bank) == 0:
-                    st.markdown("""
-                    <div class="success-banner">
-                        <div class="icon">🎉</div>
-                        <div class="text">太棒了！所有银行流水都已匹配成功！</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="error-banner">
-                        <p>❌ 共有 <strong>{len(df_unmatched_bank)}</strong> 笔银行流水未匹配，合计 <strong>¥{df_unmatched_bank['银行金额'].sum():,.2f}</strong></p>
-                        <p style="font-size: 0.9rem; color: #7f1d1d; margin-top: 0.5rem;">这些银行收款在有益云系统中没有找到对应的业务记录</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    df_unmatched_bank['到账日期'] = pd.to_datetime(df_unmatched_bank['到账日期']).dt.strftime('%Y-%m-%d')
-                    st.dataframe(df_unmatched_bank.style.format({
-                        '银行金额': '¥{:,.2f}',
-                        '系统金额': '¥{:,.2f}'
-                    }), use_container_width=True)
+            with col_date2:
+                end_date = st.date_input(
+                    "结束日期", 
+                    value=st.session_state.daily_end_date, 
+                    min_value=min_date, 
+                    max_value=max_date
+                )
             
-            with tab3:
-                if len(df_unmatched) == 0:
-                    st.markdown("""
-                    <div class="success-banner">
-                        <div class="icon">🎉</div>
-                        <div class="text">太棒了！所有业务都已到账！</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.warning(f"⚠️ 共有 {len(df_unmatched)} 条业务未到账，合计 ¥{unmatched_biz_amount:,.2f}")
-                    
-                    display_unmatched = df_unmatched.copy()
-                    display_unmatched['业务日期'] = pd.to_datetime(display_unmatched['业务日期']).dt.strftime('%Y-%m-%d')
-                    display_unmatched['预计到账日期'] = display_unmatched['预计到账日期'].apply(
-                        lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if x != '-' else '-'
-                    )
-                    
-                    st.dataframe(display_unmatched.style.format({
-                        '系统金额': '¥{:,.2f}'
-                    }), use_container_width=True)
+            with col_date3:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                submit_button = st.form_submit_button("🔍 查询统计", use_container_width=True, type="primary")
             
-            with tab4:
-                st.markdown("""
-                <div class="table-title">项目每日捐赠明细</div>
-                <div class="table-subtitle">按项目分组，展示每天的捐赠金额</div>
-                """, unsafe_allow_html=True)
-                
-                st.dataframe(pivot_df.style.format('{:,.2f}'), use_container_width=True, height=500)
-                
-                st.info(f"📌 共 **{len(pivot_df)}** 个项目，总金额 **¥{pivot_df['合计'].sum():,.2f}**")
+            if submit_button:
+                st.session_state.daily_start_date = start_date
+                st.session_state.daily_end_date = end_date
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # 使用 session_state 中的日期进行筛选
+        start_date = st.session_state.daily_start_date
+        end_date = st.session_state.daily_end_date
+        
+        # 筛选数据
+        df_filtered = df_daily[(df_daily['日期'] >= start_date) & (df_daily['日期'] <= end_date)]
+        
+        if len(df_filtered) == 0:
+            st.warning("⚠️ 所选日期范围内没有数据")
+        else:
+            # 按项目汇总
+            project_summary = df_filtered.groupby('捐赠项目').agg({
+                '捐赠金额': 'sum',
+                '捐赠时间': 'count'
+            }).reset_index()
+            project_summary.columns = ['捐赠项目', '捐赠金额', '笔数']
+            project_summary = project_summary.sort_values('捐赠金额', ascending=False)
             
-            # 下载按钮
+            # 添加合计行
+            total_row = pd.DataFrame([{
+                '捐赠项目': '总计',
+                '捐赠金额': project_summary['捐赠金额'].sum(),
+                '笔数': project_summary['笔数'].sum()
+            }])
+            project_summary_with_total = pd.concat([project_summary, total_row], ignore_index=True)
+            
+            # 显示统计信息
+            total_amount = df_filtered['捐赠金额'].sum()
+            total_count = len(df_filtered)
+            total_days = (end_date - start_date).days + 1
+            total_projects = df_filtered['捐赠项目'].nunique()
+            
+            st.markdown("##### 📊 统计概览")
+            col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+            with col_stat1:
+                st.metric("💰 总金额", f"¥{total_amount:,.2f}")
+            with col_stat2:
+                st.metric("📝 总笔数", f"{total_count:,}")
+            with col_stat3:
+                st.metric("📅 天数", f"{total_days}")
+            with col_stat4:
+                st.metric("🎯 项目数", f"{total_projects}")
+            
             st.markdown("---")
             
-            col_dl = st.columns([1, 2, 1])
-            with col_dl[1]:
-                excel_data = to_excel(df_result, df_unmatched, pivot_df, df_yiyun, df_bank_processed)
-                
-                st.download_button(
-                    label="📥 下载完整对账报告 (Excel)",
-                    data=excel_data,
-                    file_name=f"对账报告_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+            # 显示项目汇总表
+            st.markdown("##### 📋 项目汇总明细")
+            st.dataframe(
+                project_summary_with_total.style.format({
+                    '捐赠金额': '¥{:,.2f}',
+                    '笔数': '{:.0f}'
+                }).apply(lambda row: ['background-color: #f0f9ff; font-weight: bold;'] * len(row) 
+                        if row['捐赠项目'] == '总计' else [''] * len(row), axis=1),
+                use_container_width=True,
+                height=min(600, (len(project_summary_with_total) + 1) * 35 + 38)
+            )
+
