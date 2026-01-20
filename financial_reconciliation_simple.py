@@ -1014,4 +1014,32 @@ if st.session_state.get('reconcile_done', False):
                 use_container_width=True,
                 height=min(600, (len(project_summary_with_total) + 1) * 35 + 38)
             )
+            
+            # 显示捐赠明细清单
+            st.markdown("---")
+            st.markdown(f"##### 📝 捐赠明细清单（共 {total_count} 笔）")
+            
+            # 准备明细数据，保持与有益云原始数据一致的字段
+            detail_df = df_filtered.copy()
+            detail_df = detail_df.sort_values('捐赠时间', ascending=False)
+            
+            # 格式化显示
+            detail_display = detail_df.copy()
+            detail_display['捐赠时间'] = pd.to_datetime(detail_display['捐赠时间']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 设置明细表格样式，所有列左对齐
+            styled_detail = detail_display.style.format({
+                '捐赠金额': '¥{:,.2f}'
+            }).set_properties(**{
+                'text-align': 'left'
+            }).set_table_styles([
+                {'selector': 'th', 'props': [('text-align', 'left')]},
+                {'selector': 'td', 'props': [('text-align', 'left')]}
+            ])
+            
+            st.dataframe(
+                styled_detail,
+                use_container_width=True,
+                height=500
+            )
 
