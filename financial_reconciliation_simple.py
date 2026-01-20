@@ -996,12 +996,21 @@ if st.session_state.get('reconcile_done', False):
             
             # 显示项目汇总表
             st.markdown("##### 📋 项目汇总明细")
+            
+            # 设置表格样式，所有列左对齐
+            styled_table = project_summary_with_total.style.format({
+                '捐赠金额': '¥{:,.2f}',
+                '笔数': '{:.0f}'
+            }).set_properties(**{
+                'text-align': 'left'
+            }).set_table_styles([
+                {'selector': 'th', 'props': [('text-align', 'left')]},
+                {'selector': 'td', 'props': [('text-align', 'left')]}
+            ]).apply(lambda row: ['background-color: #f0f9ff; font-weight: bold;'] * len(row) 
+                    if row['捐赠项目'] == '总计' else [''] * len(row), axis=1)
+            
             st.dataframe(
-                project_summary_with_total.style.format({
-                    '捐赠金额': '¥{:,.2f}',
-                    '笔数': '{:.0f}'
-                }).apply(lambda row: ['background-color: #f0f9ff; font-weight: bold;'] * len(row) 
-                        if row['捐赠项目'] == '总计' else [''] * len(row), axis=1),
+                styled_table,
                 use_container_width=True,
                 height=min(600, (len(project_summary_with_total) + 1) * 35 + 38)
             )
