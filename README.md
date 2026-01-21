@@ -186,7 +186,142 @@ if st.session_state.get('reconcile_done', False):
    - 问题：用户关闭浏览器后 session_state 丢失
    - 解决：这是预期行为，每次使用需重新上传文件
 
-### 4. 每日汇总功能 (Daily Summary)
+### 4. 每日汇总功能 (Daily Summary with ID Tracking)
+
+**设计思路：**
+按银行到账日期筛选，精确显示该日期匹配成功的有益云流水明细
+
+**核心挑战：**
+- 问题：同一业务日期的流水可能在多个日期到账（T+1、T+2、T+3等）
+- 例如：12/21的业务有206笔，但可能90笔在12/22到账（T+1），116笔在12/23到账（T+2）
+- 需求：选择12/22时，只显示该日到账的90笔，而不是全部206笔
+
+**解决方案：ID追踪机制**
+
+```python
+# 1. 在对账时为每条有益云记录添加唯一ID
+df_yiyun['_yiyun_id'] = range(len(df_yiyun))
+
+# 2. 在汇总时保存ID列表
+t1_dict = {}
+for biz_date, group in df_t1.groupby('业务日期'):
+    t1_dict[biz_date] = {
+        '金额': round(group['捐赠金额'].sum(), 2),
+        '笔数': len(group),
+        '已匹配': False,
+        'ids': group['_yiyun_id'].tolist()  # 保存ID列表
+    }
+
+# 3. 匹配时记录对应的ID
+row_data = {
+    '到账日期': bank_date,
+    '银行金额': bank_amount,
+    '_matched_ids': t1_info['ids']  # 记录匹配的有益云ID列表
+}
+
+# 4. 每日汇总时精确提取
+# 获取该日期所有匹配的有益云ID
+date_matched_ids = []
+for ids_list in df_date_matched['_matched_ids']:
+    date_matched_ids.extend(ids_list)
+
+# 从有益云数据中精确提取
+df_date_yiyun = df_yiyun_with_id[
+    df_yiyun_with_id['_yiyun_id'].isin(date_matched_ids)
+]
+```
+
+**实现步骤：**
+
+1. **修改对账函数**
+   - 添加 `_yiyun_id` 列作为唯一标识
+   - 在汇总字典中保存 `ids` 列表
+   - 在匹配结果中添加 `_matched_ids` 字段
+   - 返回带ID的有益云数据
+
+2. **保存到 session_state**
+   ```python
+   st.session_state.df_yiyun_with_id = df_yiyun_with_id
+   ```
+
+3. **每日汇总页面**
+   - 按银行到账日期筛选对账结果
+   - 提取所有 `_matched_ids`
+   - 根据ID精确提取有益云流水
+   - 显示统计和明细
+
+4. **按日期导出Excel**
+   - 遍历日期范围内的每一天
+   - 为每个日期创建一个sheet
+   - 每个sheet包含：项目透视表 + 有益云明细
+
+**Excel导出格式处理：**
+
+```python
+# 处理科学计数法和NaN值
+text_columns = ['组织ID', '捐赠人', '联系电话', '捐赠说明', 
+                '捐赠id', '订单id', '发票号码', '商户号', '一起捐Id']
+
+def format_text_value(x):
+    if pd.isna(x):
+        return ''  # NaN显示为空
+    x_str = str(x)
+    if x_str.lower() == 'nan':
+        return ''
+    # 处理科学计数法（如 1.76573812601e+17）
+    if 'e+' in x_str.lower() or 'e-' in x_str.lower():
+        return format(int(float(x)), 'd')
+    # 处理浮点数（如 8000081582.0）
+    if '.' in x_str:
+        float_val = float(x_str)
+        if float_val == int(float_val):
+            return str(int(float_val))
+    return x_str
+
+# 应用格式化
+for col in text_columns:
+    df[col] = df[col].apply(format_text_value)
+
+# 设置Excel单元格格式为文本
+for col_idx, col_name in enumerate(df.columns, start=1):
+    if col_name in text_columns:
+        col_letter = chr(64 + col_idx)
+        for row_idx in range(start_row, end_row):
+            cell = worksheet[f'{col_letter}{row_idx}']
+            cell.number_format = '@'  # 文本格式
+```
+
+**踩过的坑：**
+
+1. **最初尝试按业务日期筛选**
+   - 问题：显示940笔而不是786笔
+   - 原因：把所有业务日期的流水都显示了
+   - 解决：改为按到账日期筛选，使用ID追踪
+
+2. **Excel科学计数法问题**
+   - 问题：大数字ID（如17位）显示为科学计数法
+   - 尝试1：转换为字符串 → 仍显示科学计数法
+   - 尝试2：设置单元格格式 → 数据已经是科学计数法
+   - 解决：先检测科学计数法，转换为整数字符串，再设置单元格格式
+
+3. **NaN值显示问题**
+   - 问题：空值显示为"nan"字符串
+   - 解决：在格式化时将NaN和"nan"都转换为空字符串
+
+4. **浮点数格式问题**
+   - 问题：`8000081582.0` 显示为浮点数
+   - 解决：检测是否为整数值的浮点数，转换为整数字符串
+
+5. **ID列在导出时显示**
+   - 问题：`_yiyun_id` 列不应该显示给用户
+   - 解决：在导出前使用 `drop(columns=['_yiyun_id'])` 移除
+
+**性能考虑：**
+- ID追踪增加了少量内存开销（每条记录一个整数）
+- 对于10万条记录，额外内存约 400KB（可忽略）
+- 查找效率：使用 `isin()` 方法，时间复杂度 O(n)，性能可接受
+
+### 5. 使用 st.form 避免频繁刷新
 
 **设计思路：**
 提供灵活的日期范围筛选，支持项目统计和明细查看
