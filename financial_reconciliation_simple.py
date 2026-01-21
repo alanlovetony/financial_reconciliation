@@ -900,146 +900,162 @@ if st.session_state.get('reconcile_done', False):
     
     elif selected_tab == 4:
         st.markdown("""
-        <div class="table-title">📅 每日捐赠汇总统计</div>
-        <div class="table-subtitle">按日期范围筛选，查看各项目的捐赠笔数和金额汇总</div>
+        <div class="table-title">📅 每日对账匹配汇总</div>
+        <div class="table-subtitle">按业务日期范围筛选，查看匹配成功的业务明细</div>
         """, unsafe_allow_html=True)
         
-        # 准备数据
-        df_daily = df_yiyun.copy()
-        df_daily['捐赠时间'] = pd.to_datetime(df_daily['捐赠时间'], errors='coerce')
-        df_daily['日期'] = df_daily['捐赠时间'].dt.date
+        # 准备数据 - 使用对账结果，只显示匹配成功的记录
+        df_matched = df_result[df_result['状态'].str.contains('✅')].copy()
         
-        # 获取日期范围
-        min_date = df_daily['日期'].min()
-        max_date = df_daily['日期'].max()
-        
-        # 初始化 session_state
-        if 'daily_start_date' not in st.session_state:
-            st.session_state.daily_start_date = min_date
-        if 'daily_end_date' not in st.session_state:
-            st.session_state.daily_end_date = max_date
-        
-        # 使用 form 来避免每次输入都刷新
-        with st.form(key='date_filter_form'):
-            st.markdown("##### 📆 选择日期范围")
-            col_date1, col_date2, col_date3 = st.columns([3, 3, 2])
-            with col_date1:
-                start_date = st.date_input(
-                    "开始日期", 
-                    value=st.session_state.daily_start_date, 
-                    min_value=min_date, 
-                    max_value=max_date
-                )
-                
-            with col_date2:
-                end_date = st.date_input(
-                    "结束日期", 
-                    value=st.session_state.daily_end_date, 
-                    min_value=min_date, 
-                    max_value=max_date
-                )
-            
-            with col_date3:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                submit_button = st.form_submit_button("🔍 查询统计", use_container_width=True, type="primary")
-            
-            if submit_button:
-                st.session_state.daily_start_date = start_date
-                st.session_state.daily_end_date = end_date
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        # 使用 session_state 中的日期进行筛选
-        start_date = st.session_state.daily_start_date
-        end_date = st.session_state.daily_end_date
-        
-        # 筛选数据
-        df_filtered = df_daily[(df_daily['日期'] >= start_date) & (df_daily['日期'] <= end_date)]
-        
-        if len(df_filtered) == 0:
-            st.warning("⚠️ 所选日期范围内没有数据")
+        if len(df_matched) == 0:
+            st.warning("⚠️ 没有匹配成功的记录")
         else:
-            # 按项目汇总
-            project_summary = df_filtered.groupby('捐赠项目').agg({
-                '捐赠金额': 'sum',
-                '捐赠时间': 'count'
-            }).reset_index()
-            project_summary.columns = ['捐赠项目', '捐赠金额', '笔数']
-            project_summary = project_summary.sort_values('捐赠金额', ascending=False)
+            # 确保匹配业务日期是日期类型
+            df_matched['匹配业务日期'] = pd.to_datetime(df_matched['匹配业务日期'], errors='coerce').dt.date
             
-            # 添加合计行
-            total_row = pd.DataFrame([{
-                '捐赠项目': '总计',
-                '捐赠金额': project_summary['捐赠金额'].sum(),
-                '笔数': project_summary['笔数'].sum()
-            }])
-            project_summary_with_total = pd.concat([project_summary, total_row], ignore_index=True)
+            # 获取日期范围（基于业务日期）
+            min_date = df_matched['匹配业务日期'].min()
+            max_date = df_matched['匹配业务日期'].max()
             
-            # 显示统计信息
-            total_amount = df_filtered['捐赠金额'].sum()
-            total_count = len(df_filtered)
-            total_days = (end_date - start_date).days + 1
-            total_projects = df_filtered['捐赠项目'].nunique()
+            # 初始化 session_state
+            if 'daily_start_date' not in st.session_state:
+                st.session_state.daily_start_date = min_date
+            if 'daily_end_date' not in st.session_state:
+                st.session_state.daily_end_date = max_date
             
-            st.markdown("##### 📊 统计概览")
-            col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
-            with col_stat1:
-                st.metric("💰 总金额", f"¥{total_amount:,.2f}")
-            with col_stat2:
-                st.metric("📝 总笔数", f"{total_count:,}")
-            with col_stat3:
-                st.metric("📅 天数", f"{total_days}")
-            with col_stat4:
-                st.metric("🎯 项目数", f"{total_projects}")
+            # 使用 form 来避免每次输入都刷新
+            with st.form(key='date_filter_form'):
+                st.markdown("##### 📆 选择业务日期范围")
+                col_date1, col_date2, col_date3 = st.columns([3, 3, 2])
+                with col_date1:
+                    start_date = st.date_input(
+                        "开始日期", 
+                        value=st.session_state.daily_start_date, 
+                        min_value=min_date, 
+                        max_value=max_date
+                    )
+                    
+                with col_date2:
+                    end_date = st.date_input(
+                        "结束日期", 
+                        value=st.session_state.daily_end_date, 
+                        min_value=min_date, 
+                        max_value=max_date
+                    )
+                
+                with col_date3:
+                    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                    submit_button = st.form_submit_button("🔍 查询统计", use_container_width=True, type="primary")
+                
+                if submit_button:
+                    st.session_state.daily_start_date = start_date
+                    st.session_state.daily_end_date = end_date
             
-            st.markdown("---")
+            st.markdown("<br>", unsafe_allow_html=True)
             
-            # 显示项目汇总表
-            st.markdown("##### 📋 项目汇总明细")
+            # 使用 session_state 中的日期进行筛选
+            start_date = st.session_state.daily_start_date
+            end_date = st.session_state.daily_end_date
             
-            # 设置表格样式，所有列左对齐
-            styled_table = project_summary_with_total.style.format({
-                '捐赠金额': '¥{:,.2f}',
-                '笔数': '{:.0f}'
-            }).set_properties(**{
-                'text-align': 'left'
-            }).set_table_styles([
-                {'selector': 'th', 'props': [('text-align', 'left')]},
-                {'selector': 'td', 'props': [('text-align', 'left')]}
-            ]).apply(lambda row: ['background-color: #f0f9ff; font-weight: bold;'] * len(row) 
-                    if row['捐赠项目'] == '总计' else [''] * len(row), axis=1)
+            # 筛选数据 - 按业务日期（匹配业务日期）
+            df_filtered = df_matched[(df_matched['匹配业务日期'] >= start_date) & (df_matched['匹配业务日期'] <= end_date)]
             
-            st.dataframe(
-                styled_table,
-                use_container_width=True,
-                height=min(600, (len(project_summary_with_total) + 1) * 35 + 38)
-            )
-            
-            # 显示捐赠明细清单
-            st.markdown("---")
-            st.markdown(f"##### 📝 捐赠明细清单（共 {total_count} 笔）")
-            
-            # 准备明细数据，保持与有益云原始数据一致的字段
-            detail_df = df_filtered.copy()
-            detail_df = detail_df.sort_values('捐赠时间', ascending=False)
-            
-            # 格式化显示
-            detail_display = detail_df.copy()
-            detail_display['捐赠时间'] = pd.to_datetime(detail_display['捐赠时间']).dt.strftime('%Y-%m-%d %H:%M:%S')
-            
-            # 设置明细表格样式，所有列左对齐
-            styled_detail = detail_display.style.format({
-                '捐赠金额': '¥{:,.2f}'
-            }).set_properties(**{
-                'text-align': 'left'
-            }).set_table_styles([
-                {'selector': 'th', 'props': [('text-align', 'left')]},
-                {'selector': 'td', 'props': [('text-align', 'left')]}
-            ])
-            
-            st.dataframe(
-                styled_detail,
-                use_container_width=True,
-                height=500
-            )
+            if len(df_filtered) == 0:
+                st.warning("⚠️ 所选日期范围内没有匹配成功的记录")
+            else:
+                # 获取匹配业务日期列表，用于从有益云数据中提取对应的明细
+                matched_biz_dates = df_filtered['匹配业务日期'].dropna().unique()
+                
+                # 从有益云数据中筛选出这些业务日期的记录（被匹配上的记录）
+                df_yiyun_copy = df_yiyun.copy()
+                df_yiyun_copy['捐赠时间'] = pd.to_datetime(df_yiyun_copy['捐赠时间'], errors='coerce')
+                df_yiyun_copy['业务日期'] = df_yiyun_copy['捐赠时间'].dt.date
+                df_yiyun_matched = df_yiyun_copy[df_yiyun_copy['业务日期'].isin(matched_biz_dates)]
+                
+                # 按项目汇总
+                if len(df_yiyun_matched) > 0:
+                    project_summary = df_yiyun_matched.groupby('捐赠项目').agg({
+                        '捐赠金额': 'sum',
+                        '捐赠时间': 'count'
+                    }).reset_index()
+                    project_summary.columns = ['捐赠项目', '捐赠金额', '笔数']
+                    project_summary = project_summary.sort_values('捐赠金额', ascending=False)
+                    
+                    # 添加合计行
+                    total_row = pd.DataFrame([{
+                        '捐赠项目': '总计',
+                        '捐赠金额': project_summary['捐赠金额'].sum(),
+                        '笔数': project_summary['笔数'].sum()
+                    }])
+                    project_summary_with_total = pd.concat([project_summary, total_row], ignore_index=True)
+                    
+                    # 显示统计信息
+                    total_amount = df_yiyun_matched['捐赠金额'].sum()
+                    total_count = len(df_yiyun_matched)
+                    total_days = (end_date - start_date).days + 1
+                    total_projects = df_yiyun_matched['捐赠项目'].nunique()
+                    
+                    st.markdown("##### 📊 统计概览")
+                    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+                    with col_stat1:
+                        st.metric("💰 匹配金额", f"¥{total_amount:,.2f}")
+                    with col_stat2:
+                        st.metric("📝 匹配笔数", f"{total_count:,}")
+                    with col_stat3:
+                        st.metric("📅 天数", f"{total_days}")
+                    with col_stat4:
+                        st.metric("🎯 项目数", f"{total_projects}")
+                    
+                    st.markdown("---")
+                    
+                    # 显示项目汇总表
+                    st.markdown("##### 📋 项目汇总明细")
+                    
+                    # 设置表格样式，所有列左对齐
+                    styled_table = project_summary_with_total.style.format({
+                        '捐赠金额': '¥{:,.2f}',
+                        '笔数': '{:.0f}'
+                    }).set_properties(**{
+                        'text-align': 'left'
+                    }).set_table_styles([
+                        {'selector': 'th', 'props': [('text-align', 'left')]},
+                        {'selector': 'td', 'props': [('text-align', 'left')]}
+                    ]).apply(lambda row: ['background-color: #f0f9ff; font-weight: bold;'] * len(row) 
+                            if row['捐赠项目'] == '总计' else [''] * len(row), axis=1)
+                    
+                    st.dataframe(
+                        styled_table,
+                        use_container_width=True,
+                        height=min(600, (len(project_summary_with_total) + 1) * 35 + 38)
+                    )
+                    
+                    # 显示有益云匹配明细清单（保持有益云原始字段）
+                    st.markdown("---")
+                    st.markdown(f"##### 📝 捐赠明细清单（共 {total_count} 笔）")
+                    
+                    # 准备明细数据 - 显示有益云的原始字段
+                    detail_df = df_yiyun_matched.copy()
+                    detail_df = detail_df.sort_values('捐赠时间', ascending=False)
+                    
+                    # 格式化显示
+                    detail_display = detail_df.copy()
+                    detail_display['捐赠时间'] = pd.to_datetime(detail_display['捐赠时间']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # 设置明细表格样式，所有列左对齐
+                    styled_detail = detail_display.style.format({
+                        '捐赠金额': '¥{:,.2f}'
+                    }).set_properties(**{
+                        'text-align': 'left'
+                    }).set_table_styles([
+                        {'selector': 'th', 'props': [('text-align', 'left')]},
+                        {'selector': 'td', 'props': [('text-align', 'left')]}
+                    ])
+                    
+                    st.dataframe(
+                        styled_detail,
+                        use_container_width=True,
+                        height=500
+                    )
+                else:
+                    st.warning("⚠️ 没有找到匹配的有益云数据")
 
