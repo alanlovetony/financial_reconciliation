@@ -401,10 +401,11 @@ def extract_biz_date_from_remark(remark, bank_date):
 
 
 def reconcile_each_bank_row(df_yiyun, df_bank):
-    """核心对账逻辑 - 逐笔银行流水核对，增加交易笔数，支持月捐968结尾特殊匹配"""
+    """核心对账逻辑 - 逐笔银行流水核对，增加交易笔数，支持月捐968结尾特殊匹配，并追踪明细ID"""
     
-    # 处理有益云数据
+    # 处理有益云数据 - 添加唯一ID用于追踪
     df_yiyun = df_yiyun.copy()
+    df_yiyun['_yiyun_id'] = range(len(df_yiyun))  # 添加唯一ID
     df_yiyun['捐赠时间'] = pd.to_datetime(df_yiyun['捐赠时间'], errors='coerce')
     df_yiyun['业务日期'] = df_yiyun['捐赠时间'].dt.date
     
@@ -418,41 +419,45 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
     df_t1_monthly = df_t1[df_t1['是否月捐']].copy()
     df_t1_regular = df_t1[~df_t1['是否月捐']].copy()
     
-    # T+1 月捐按日期汇总
-    t1_monthly_daily = df_t1_monthly.groupby('业务日期').agg({
-        '捐赠金额': 'sum',
-        '捐赠项目': 'count'
-    }).reset_index()
-    t1_monthly_daily.columns = ['业务日期', '金额', '笔数']
-    t1_monthly_dict = {row['业务日期']: {'金额': round(row['金额'], 2), '笔数': int(row['笔数']), '已匹配': False}
-                       for _, row in t1_monthly_daily.iterrows()}
+    # T+1 月捐按日期汇总 - 保存ID列表
+    t1_monthly_dict = {}
+    for biz_date, group in df_t1_monthly.groupby('业务日期'):
+        t1_monthly_dict[biz_date] = {
+            '金额': round(group['捐赠金额'].sum(), 2),
+            '笔数': len(group),
+            '已匹配': False,
+            'ids': group['_yiyun_id'].tolist()
+        }
     
-    # T+1 常规按日期汇总
-    t1_regular_daily = df_t1_regular.groupby('业务日期').agg({
-        '捐赠金额': 'sum',
-        '捐赠项目': 'count'
-    }).reset_index()
-    t1_regular_daily.columns = ['业务日期', '金额', '笔数']
-    t1_regular_dict = {row['业务日期']: {'金额': round(row['金额'], 2), '笔数': int(row['笔数']), '已匹配': False}
-                       for _, row in t1_regular_daily.iterrows()}
+    # T+1 常规按日期汇总 - 保存ID列表
+    t1_regular_dict = {}
+    for biz_date, group in df_t1_regular.groupby('业务日期'):
+        t1_regular_dict[biz_date] = {
+            '金额': round(group['捐赠金额'].sum(), 2),
+            '笔数': len(group),
+            '已匹配': False,
+            'ids': group['_yiyun_id'].tolist()
+        }
     
-    # T+1 总汇总（用于向后兼容）
-    t1_daily = df_t1.groupby('业务日期').agg({
-        '捐赠金额': 'sum',
-        '捐赠项目': 'count'
-    }).reset_index()
-    t1_daily.columns = ['业务日期', '金额', '笔数']
-    t1_dict = {row['业务日期']: {'金额': round(row['金额'], 2), '笔数': int(row['笔数']), '已匹配': False}
-               for _, row in t1_daily.iterrows()}
+    # T+1 总汇总 - 保存ID列表
+    t1_dict = {}
+    for biz_date, group in df_t1.groupby('业务日期'):
+        t1_dict[biz_date] = {
+            '金额': round(group['捐赠金额'].sum(), 2),
+            '笔数': len(group),
+            '已匹配': False,
+            'ids': group['_yiyun_id'].tolist()
+        }
     
-    # T+N 按日期汇总（包含笔数）
-    tn_daily = df_tn.groupby('业务日期').agg({
-        '捐赠金额': 'sum',
-        '捐赠项目': 'count'
-    }).reset_index()
-    tn_daily.columns = ['业务日期', '金额', '笔数']
-    tn_dict = {row['业务日期']: {'金额': round(row['金额'], 2), '笔数': int(row['笔数']), '已匹配': False}
-               for _, row in tn_daily.iterrows()}
+    # T+N 按日期汇总 - 保存ID列表
+    tn_dict = {}
+    for biz_date, group in df_tn.groupby('业务日期'):
+        tn_dict[biz_date] = {
+            '金额': round(group['捐赠金额'].sum(), 2),
+            '笔数': len(group),
+            '已匹配': False,
+            'ids': group['_yiyun_id'].tolist()
+        }
     
     # 处理银行流水
     df_bank = df_bank.copy()
@@ -482,7 +487,8 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
             '交易笔数': 0,
             '匹配业务日期': None,
             '系统金额': 0,
-            '状态': '❌ 未匹配'
+            '状态': '❌ 未匹配',
+            '_matched_ids': []  # 新增：记录匹配的有益云ID列表
         }
         
         matched = False
@@ -503,6 +509,7 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
                     row_data['匹配业务日期'] = t1_biz_date
                     row_data['系统金额'] = monthly_info['金额']
                     row_data['状态'] = '✅ 匹配'
+                    row_data['_matched_ids'] = monthly_info['ids']  # 记录ID
                     t1_monthly_dict[t1_biz_date]['已匹配'] = True
                     # 同时标记总汇总已匹配
                     if t1_biz_date in t1_dict:
@@ -520,6 +527,7 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
                     row_data['匹配业务日期'] = t1_biz_date
                     row_data['系统金额'] = regular_info['金额']
                     row_data['状态'] = '✅ 匹配'
+                    row_data['_matched_ids'] = regular_info['ids']  # 记录ID
                     t1_regular_dict[t1_biz_date]['已匹配'] = True
                     # 检查该日期的月捐是否也已匹配
                     if t1_biz_date in t1_dict:
@@ -537,6 +545,7 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
                 row_data['匹配业务日期'] = t1_biz_date
                 row_data['系统金额'] = t1_info['金额']
                 row_data['状态'] = '✅ 匹配'
+                row_data['_matched_ids'] = t1_info['ids']  # 记录ID
                 t1_dict[t1_biz_date]['已匹配'] = True
                 matched = True
         
@@ -553,6 +562,7 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
                     row_data['匹配业务日期'] = biz_date_from_remark
                     row_data['系统金额'] = tn_info['金额']
                     row_data['状态'] = '✅ 匹配'
+                    row_data['_matched_ids'] = tn_info['ids']  # 记录ID
                     tn_dict[biz_date_from_remark]['已匹配'] = True
                     matched = True
             
@@ -568,6 +578,7 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
                             row_data['匹配业务日期'] = tn_biz_date
                             row_data['系统金额'] = tn_info['金额']
                             row_data['状态'] = '✅ 匹配'
+                            row_data['_matched_ids'] = tn_info['ids']  # 记录ID
                             tn_dict[tn_biz_date]['已匹配'] = True
                             matched = True
                             break
@@ -609,7 +620,8 @@ def reconcile_each_bank_row(df_yiyun, df_bank):
     }).reset_index()
     df_project.columns = ['项目', '日期', '金额']
     
-    return df_result, df_unmatched, df_project, df_bank, len(df_t1), len(df_tn)
+    # 返回时也返回带ID的有益云数据
+    return df_result, df_unmatched, df_project, df_bank, len(df_t1), len(df_tn), df_yiyun
 
 
 def create_project_pivot(df_project):
@@ -711,7 +723,7 @@ if file_yiyun and file_bank:
             df_yiyun = load_yiyun_file(file_yiyun)
             df_bank = load_bank_file(file_bank)
             
-            df_result, df_unmatched, df_project, df_bank_processed, t1_count, tn_count = reconcile_each_bank_row(df_yiyun, df_bank)
+            df_result, df_unmatched, df_project, df_bank_processed, t1_count, tn_count, df_yiyun_with_id = reconcile_each_bank_row(df_yiyun, df_bank)
             pivot_df = create_project_pivot(df_project)
             
             # 保存到 session_state
@@ -724,6 +736,7 @@ if file_yiyun and file_bank:
             st.session_state.t1_count = t1_count
             st.session_state.tn_count = tn_count
             st.session_state.df_yiyun = df_yiyun
+            st.session_state.df_yiyun_with_id = df_yiyun_with_id  # 保存带ID的版本
             st.session_state.df_bank = df_bank
             
             # 对账完成后跳转到第一个页签
@@ -901,7 +914,7 @@ if st.session_state.get('reconcile_done', False):
     elif selected_tab == 4:
         st.markdown("""
         <div class="table-title">📅 每日对账匹配汇总</div>
-        <div class="table-subtitle">按业务日期范围筛选，查看匹配成功的业务明细</div>
+        <div class="table-subtitle">按银行到账日期筛选，查看该日到账的所有匹配业务明细</div>
         """, unsafe_allow_html=True)
         
         # 准备数据 - 使用对账结果，只显示匹配成功的记录
@@ -910,12 +923,12 @@ if st.session_state.get('reconcile_done', False):
         if len(df_matched) == 0:
             st.warning("⚠️ 没有匹配成功的记录")
         else:
-            # 确保匹配业务日期是日期类型
-            df_matched['匹配业务日期'] = pd.to_datetime(df_matched['匹配业务日期'], errors='coerce').dt.date
+            # 确保到账日期是日期类型
+            df_matched['到账日期'] = pd.to_datetime(df_matched['到账日期'], errors='coerce').dt.date
             
-            # 获取日期范围（基于业务日期）
-            min_date = df_matched['匹配业务日期'].min()
-            max_date = df_matched['匹配业务日期'].max()
+            # 获取日期范围（基于银行到账日期）
+            min_date = df_matched['到账日期'].min()
+            max_date = df_matched['到账日期'].max()
             
             # 初始化 session_state
             if 'daily_start_date' not in st.session_state:
@@ -925,7 +938,7 @@ if st.session_state.get('reconcile_done', False):
             
             # 使用 form 来避免每次输入都刷新
             with st.form(key='date_filter_form'):
-                st.markdown("##### 📆 选择业务日期范围")
+                st.markdown("##### 📆 选择银行到账日期范围")
                 col_date1, col_date2, col_date3 = st.columns([3, 3, 2])
                 with col_date1:
                     start_date = st.date_input(
@@ -957,20 +970,40 @@ if st.session_state.get('reconcile_done', False):
             start_date = st.session_state.daily_start_date
             end_date = st.session_state.daily_end_date
             
-            # 筛选数据 - 按业务日期（匹配业务日期）
-            df_filtered = df_matched[(df_matched['匹配业务日期'] >= start_date) & (df_matched['匹配业务日期'] <= end_date)]
+            # 筛选数据 - 按银行到账日期
+            df_filtered = df_matched[(df_matched['到账日期'] >= start_date) & (df_matched['到账日期'] <= end_date)]
             
             if len(df_filtered) == 0:
                 st.warning("⚠️ 所选日期范围内没有匹配成功的记录")
             else:
-                # 获取匹配业务日期列表，用于从有益云数据中提取对应的明细
-                matched_biz_dates = df_filtered['匹配业务日期'].dropna().unique()
+                # 获取所有匹配的有益云ID
+                all_matched_ids = []
+                for ids_list in df_filtered['_matched_ids']:
+                    if isinstance(ids_list, list):
+                        all_matched_ids.extend(ids_list)
                 
-                # 从有益云数据中筛选出这些业务日期的记录（被匹配上的记录）
-                df_yiyun_copy = df_yiyun.copy()
-                df_yiyun_copy['捐赠时间'] = pd.to_datetime(df_yiyun_copy['捐赠时间'], errors='coerce')
-                df_yiyun_copy['业务日期'] = df_yiyun_copy['捐赠时间'].dt.date
-                df_yiyun_matched = df_yiyun_copy[df_yiyun_copy['业务日期'].isin(matched_biz_dates)]
+                # 从带ID的有益云数据中精确提取匹配的记录
+                df_yiyun_with_id = st.session_state.get('df_yiyun_with_id', df_yiyun)
+                df_yiyun_matched = df_yiyun_with_id[df_yiyun_with_id['_yiyun_id'].isin(all_matched_ids)].copy()
+                
+                # 显示统计信息 - 使用银行流水记录的准确数据
+                total_amount = df_filtered['银行金额'].sum()
+                total_count = df_filtered['交易笔数'].sum()  # 使用交易笔数总和
+                total_days = (end_date - start_date).days + 1
+                bank_records = len(df_filtered)  # 银行流水笔数
+                
+                st.markdown("##### 📊 统计概览")
+                col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+                with col_stat1:
+                    st.metric("💰 匹配金额", f"¥{total_amount:,.2f}")
+                with col_stat2:
+                    st.metric("📝 交易笔数", f"{int(total_count):,}")
+                with col_stat3:
+                    st.metric("🏦 银行流水", f"{bank_records}")
+                with col_stat4:
+                    st.metric("📅 天数", f"{total_days}")
+                
+                st.markdown("---")
                 
                 # 按项目汇总
                 if len(df_yiyun_matched) > 0:
@@ -988,25 +1021,6 @@ if st.session_state.get('reconcile_done', False):
                         '笔数': project_summary['笔数'].sum()
                     }])
                     project_summary_with_total = pd.concat([project_summary, total_row], ignore_index=True)
-                    
-                    # 显示统计信息
-                    total_amount = df_yiyun_matched['捐赠金额'].sum()
-                    total_count = len(df_yiyun_matched)
-                    total_days = (end_date - start_date).days + 1
-                    total_projects = df_yiyun_matched['捐赠项目'].nunique()
-                    
-                    st.markdown("##### 📊 统计概览")
-                    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
-                    with col_stat1:
-                        st.metric("💰 匹配金额", f"¥{total_amount:,.2f}")
-                    with col_stat2:
-                        st.metric("📝 匹配笔数", f"{total_count:,}")
-                    with col_stat3:
-                        st.metric("📅 天数", f"{total_days}")
-                    with col_stat4:
-                        st.metric("🎯 项目数", f"{total_projects}")
-                    
-                    st.markdown("---")
                     
                     # 显示项目汇总表
                     st.markdown("##### 📋 项目汇总明细")
@@ -1031,10 +1045,10 @@ if st.session_state.get('reconcile_done', False):
                     
                     # 显示有益云匹配明细清单（保持有益云原始字段）
                     st.markdown("---")
-                    st.markdown(f"##### 📝 捐赠明细清单（共 {total_count} 笔）")
+                    st.markdown(f"##### 📝 捐赠明细清单（共 {int(total_count)} 笔）")
                     
-                    # 准备明细数据 - 显示有益云的原始字段
-                    detail_df = df_yiyun_matched.copy()
+                    # 准备明细数据 - 显示有益云的原始字段，移除内部ID列
+                    detail_df = df_yiyun_matched.drop(columns=['_yiyun_id', '业务日期'], errors='ignore').copy()
                     detail_df = detail_df.sort_values('捐赠时间', ascending=False)
                     
                     # 格式化显示
@@ -1056,6 +1070,120 @@ if st.session_state.get('reconcile_done', False):
                         use_container_width=True,
                         height=500
                     )
+                    
+                    # 导出功能 - 按日期分sheet
+                    st.markdown("---")
+                    st.markdown("##### 📥 导出数据")
+                    
+                    # 生成按日期分sheet的Excel
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        # 获取日期范围内的所有日期
+                        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+                        
+                        for single_date in date_range:
+                            single_date_obj = single_date.date()
+                            
+                            # 筛选该日期的匹配记录
+                            df_date_matched = df_matched[df_matched['到账日期'] == single_date_obj]
+                            
+                            if len(df_date_matched) > 0:
+                                # 获取该日期所有匹配的有益云ID
+                                date_matched_ids = []
+                                for ids_list in df_date_matched['_matched_ids']:
+                                    if isinstance(ids_list, list):
+                                        date_matched_ids.extend(ids_list)
+                                
+                                # 从带ID的有益云数据中精确提取该日期匹配的记录
+                                df_yiyun_with_id = st.session_state.get('df_yiyun_with_id', df_yiyun)
+                                df_date_yiyun = df_yiyun_with_id[df_yiyun_with_id['_yiyun_id'].isin(date_matched_ids)].copy()
+                                
+                                if len(df_date_yiyun) > 0:
+                                    # 按项目汇总
+                                    date_project_summary = df_date_yiyun.groupby('捐赠项目').agg({
+                                        '捐赠金额': 'sum',
+                                        '捐赠时间': 'count'
+                                    }).reset_index()
+                                    date_project_summary.columns = ['项目名称', '金额', '笔数']
+                                    date_project_summary = date_project_summary.sort_values('金额', ascending=False)
+                                    
+                                    # 添加合计行
+                                    date_total = pd.DataFrame([{
+                                        '项目名称': '合计',
+                                        '金额': date_project_summary['金额'].sum(),
+                                        '笔数': date_project_summary['笔数'].sum()
+                                    }])
+                                    date_project_with_total = pd.concat([date_project_summary, date_total], ignore_index=True)
+                                    
+                                    # Sheet名称：使用日期格式 MM-DD
+                                    sheet_name = single_date.strftime('%m-%d')
+                                    
+                                    # 写入项目透视表（放在前面）
+                                    date_project_with_total.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+                                    
+                                    # 获取worksheet对象
+                                    worksheet = writer.sheets[sheet_name]
+                                    start_row = len(date_project_with_total) + 2  # 透视表后空一行
+                                    
+                                    # 写入明细数据（移除_yiyun_id列）
+                                    df_date_yiyun_export = df_date_yiyun.drop(columns=['_yiyun_id'], errors='ignore').sort_values('捐赠时间', ascending=False)
+                                    
+                                    # 将可能被识别为数字的列转换为字符串（避免科学计数法）
+                                    text_columns = ['组织ID', '捐赠人', '联系电话', '捐赠说明', '捐赠id', '订单id', '发票号码', '商户号', '一起捐Id']
+                                    for col in text_columns:
+                                        if col in df_date_yiyun_export.columns:
+                                            # 处理NaN和数字格式
+                                            def format_text_value(x):
+                                                if pd.isna(x):
+                                                    return ''
+                                                # 转换为字符串
+                                                x_str = str(x)
+                                                if x_str.lower() == 'nan':
+                                                    return ''
+                                                # 如果包含科学计数法标记
+                                                if 'e+' in x_str.lower() or 'e-' in x_str.lower():
+                                                    try:
+                                                        # 转换为浮点数再转为整数字符串
+                                                        return format(int(float(x)), 'd')
+                                                    except:
+                                                        return x_str
+                                                # 如果是浮点数格式（如 8000081582.0），转换为整数字符串
+                                                if '.' in x_str:
+                                                    try:
+                                                        float_val = float(x_str)
+                                                        if float_val == int(float_val):
+                                                            return str(int(float_val))
+                                                    except:
+                                                        pass
+                                                return x_str
+                                            
+                                            df_date_yiyun_export[col] = df_date_yiyun_export[col].apply(format_text_value)
+                                    
+                                    df_date_yiyun_export.to_excel(writer, sheet_name=sheet_name, index=False, startrow=start_row)
+                                    
+                                    # 设置文本列格式为文本（防止科学计数法）
+                                    from openpyxl.styles import numbers
+                                    for col_idx, col_name in enumerate(df_date_yiyun_export.columns, start=1):
+                                        if col_name in text_columns:
+                                            col_letter = chr(64 + col_idx)  # A=65, B=66, etc.
+                                            for row_idx in range(start_row + 2, start_row + 2 + len(df_date_yiyun_export)):
+                                                cell = worksheet[f'{col_letter}{row_idx}']
+                                                cell.number_format = '@'  # @ 表示文本格式
+                    
+                    output.seek(0)
+                    
+                    # 下载按钮
+                    file_name = f"每日汇总_{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.xlsx"
+                    st.download_button(
+                        label="📥 下载按日期分sheet的Excel",
+                        data=output.getvalue(),
+                        file_name=file_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                    
+                    st.info(f"💡 导出文件包含 {len([d for d in date_range if d.date() in df_matched['到账日期'].values])} 个日期的数据，每个日期一个sheet页签")
+                    
                 else:
                     st.warning("⚠️ 没有找到匹配的有益云数据")
 
